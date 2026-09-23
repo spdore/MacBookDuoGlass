@@ -38,7 +38,7 @@ enum SelfTest {
         }
         let nearThreshold = EffectModel.state(angle: EffectModel.clearThreshold - 1).intensity
         let midpoint = EffectModel.state(angle: EffectModel.clearThreshold * 0.5).intensity
-        guard nearThreshold < 0.05, midpoint > nearThreshold, midpoint < 0.3 else {
+        guard nearThreshold < 0.05, midpoint > 0.27, midpoint < 0.33 else {
             print("Exponential strength curve: failed")
             return 1
         }

@@ -25,7 +25,7 @@ struct EffectModel {
     static let defaultThreshold: Double = 100.0
     // Higher values keep the effect softer just below the threshold and make
     // it build faster as the lid approaches the closed position.
-    static let intensityCurve: Double = 3.0
+    static let intensityCurve: Double = 1.7
     private static let thresholdKey = "effectStartAngleDegrees"
     private static var cachedThreshold: Double = {
         let stored = UserDefaults.standard.object(forKey: thresholdKey) as? NSNumber
