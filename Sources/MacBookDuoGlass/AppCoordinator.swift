@@ -18,6 +18,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var permissionPollTimer: Timer?
     private var permissionRequestActive = false
     private weak var thresholdControl: ThresholdMenuView?
+    private weak var curveControl: CurveMenuView?
     private let frameLock = NSLock()
     private var pendingFrame: CVPixelBuffer?
     private var frameDeliveryScheduled = false
@@ -58,6 +59,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         thresholdItem.view = thresholdControl
         menu.addItem(thresholdItem)
         self.thresholdControl = thresholdControl
+        let curveControl = CurveMenuView(curve: EffectModel.intensityCurve)
+        curveControl.onChange = { [weak self] curve in
+            self?.setIntensityCurve(curve)
+        }
+        let curveItem = NSMenuItem()
+        curveItem.view = curveControl
+        menu.addItem(curveItem)
+        self.curveControl = curveControl
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "显示诊断", action: #selector(showDiagnostics), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "重新检查屏幕录制权限", action: #selector(recheckPermission), keyEquivalent: ""))
@@ -354,6 +363,14 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func setThreshold(_ threshold: Double) {
         EffectModel.clearThreshold = threshold
         thresholdControl?.setThreshold(EffectModel.clearThreshold)
+        guard currentEffect.isValid else { return }
+        currentEffect = EffectModel.state(angle: currentEffect.angle)
+        updateCaptureDemand()
+    }
+
+    private func setIntensityCurve(_ curve: Double) {
+        EffectModel.intensityCurve = curve
+        curveControl?.setCurve(EffectModel.intensityCurve)
         guard currentEffect.isValid else { return }
         currentEffect = EffectModel.state(angle: currentEffect.angle)
         updateCaptureDemand()

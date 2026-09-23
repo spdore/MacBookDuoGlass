@@ -9,8 +9,13 @@ enum SelfTest {
         let application = NSApplication.shared
         application.setActivationPolicy(.prohibited)
         let savedThreshold = EffectModel.clearThreshold
+        let savedCurve = EffectModel.intensityCurve
         EffectModel.clearThreshold = EffectModel.defaultThreshold
-        defer { EffectModel.clearThreshold = savedThreshold }
+        EffectModel.intensityCurve = EffectModel.defaultIntensityCurve
+        defer {
+            EffectModel.clearThreshold = savedThreshold
+            EffectModel.intensityCurve = savedCurve
+        }
 
         guard EffectModel.clampThreshold(74) == 75,
               EffectModel.clampThreshold(121) == 120,
@@ -19,6 +24,14 @@ enum SelfTest {
             return 1
         }
         print("Threshold range: 75°–120° (ok)")
+
+        guard EffectModel.clampIntensityCurve(-1) == EffectModel.minimumIntensityCurve,
+              EffectModel.clampIntensityCurve(5) == EffectModel.maximumIntensityCurve,
+              EffectModel.clampIntensityCurve(1.7) == 1.7 else {
+            print("Intensity curve range: failed")
+            return 1
+        }
+        print("Intensity curve range: 0.0–4.0 (ok)")
 
         let at100 = EffectModel.state(angle: 100).intensity
         let at0 = EffectModel.state(angle: 0).intensity

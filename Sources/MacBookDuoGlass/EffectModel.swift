@@ -23,13 +23,20 @@ struct EffectModel {
     static let minimumThreshold: Double = 75.0
     static let maximumThreshold: Double = 120.0
     static let defaultThreshold: Double = 100.0
+    static let minimumIntensityCurve: Double = 0.0
+    static let maximumIntensityCurve: Double = 4.0
+    static let defaultIntensityCurve: Double = 1.7
     // Higher values keep the effect softer just below the threshold and make
     // it build faster as the lid approaches the closed position.
-    static let intensityCurve: Double = 1.7
+    private static let intensityCurveKey = "effectIntensityCurve"
     private static let thresholdKey = "effectStartAngleDegrees"
     private static var cachedThreshold: Double = {
         let stored = UserDefaults.standard.object(forKey: thresholdKey) as? NSNumber
         return clampThreshold(stored?.doubleValue ?? defaultThreshold)
+    }()
+    private static var cachedIntensityCurve: Double = {
+        let stored = UserDefaults.standard.object(forKey: intensityCurveKey) as? NSNumber
+        return clampIntensityCurve(stored?.doubleValue ?? defaultIntensityCurve)
     }()
 
     static var clearThreshold: Double {
@@ -41,8 +48,21 @@ struct EffectModel {
         }
     }
 
+    static var intensityCurve: Double {
+        get { cachedIntensityCurve }
+        set {
+            let value = clampIntensityCurve(newValue)
+            cachedIntensityCurve = value
+            UserDefaults.standard.set(value, forKey: intensityCurveKey)
+        }
+    }
+
     static func clampThreshold(_ value: Double) -> Double {
         min(max(value, minimumThreshold), maximumThreshold)
+    }
+
+    static func clampIntensityCurve(_ value: Double) -> Double {
+        min(max(value, minimumIntensityCurve), maximumIntensityCurve)
     }
 
     static func state(angle: Double, isValid: Bool = true) -> EffectState {
@@ -100,6 +120,7 @@ struct EffectModel {
         let clamped = min(max(progress, 0), 1)
         guard clamped > 0 else { return 0 }
         guard clamped < 1 else { return 1 }
+        guard intensityCurve > 0 else { return clamped }
         let denominator = exp(intensityCurve) - 1
         return (exp(intensityCurve * clamped) - 1) / denominator
     }
