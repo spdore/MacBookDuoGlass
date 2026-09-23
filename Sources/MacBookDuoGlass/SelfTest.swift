@@ -28,12 +28,21 @@ enum SelfTest {
         var previous: Float = 1
         for angle in stride(from: 0.0, through: 100.0, by: 0.5) {
             let state = EffectModel.state(angle: angle)
+            let progress = min(max((EffectModel.clearThreshold - angle) / EffectModel.clearThreshold, 0), 1)
+            let expected = Float(EffectModel.intensity(forProgress: progress))
             guard state.intensity <= previous,
-                  abs(state.intensity - Float(1 - angle / 100)) < 0.00001,
+                  abs(state.intensity - expected) < 0.00001,
                   (0..<120).allSatisfy({ _ in EffectModel.state(angle: angle).intensity == state.intensity })
             else { print("Angle stability: failed"); return 1 }
             previous = state.intensity
         }
+        let nearThreshold = EffectModel.state(angle: EffectModel.clearThreshold - 1).intensity
+        let midpoint = EffectModel.state(angle: EffectModel.clearThreshold * 0.5).intensity
+        guard nearThreshold < 0.05, midpoint > nearThreshold, midpoint < 0.3 else {
+            print("Exponential strength curve: failed")
+            return 1
+        }
+        print(String(format: "Exponential strength curve: near threshold %.1f%%, midpoint %.1f%% (ok)", nearThreshold * 100, midpoint * 100))
         guard EffectModel.state(angle: 100).isClear,
               EffectModel.state(angle: 100.01).isClear,
               !EffectModel.state(angle: .nan).isValid else { return 1 }

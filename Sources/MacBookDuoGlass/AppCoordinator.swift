@@ -11,25 +11,29 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var currentEffect = EffectModel.state(angle: 0, isValid: false)
     private var lastFrame: CVPixelBuffer?
     private var isEnabled = true
+    private var captureDemandActive = false
     private var isCaptureReady = false
     private var captureError: String?
+    private var captureRetrySuppressed = false
     private var permissionPollTimer: Timer?
+    private var permissionRequestActive = false
     private weak var thresholdControl: ThresholdMenuView?
     private let frameLock = NSLock()
     private var pendingFrame: CVPixelBuffer?
     private var frameDeliveryScheduled = false
+    private var frameDeliverySession = 0
+    private var captureSessionID = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         installLifecycleObservers()
         startSensor()
-        requestOrStartCapture()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionPollTimer?.invalidate()
-        capture.stop()
+        stopCaptureForInactiveState()
         sensor.stop()
         hideOverlay()
     }
@@ -70,25 +74,41 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func requestOrStartCapture() {
+        guard captureDemandActive,
+              !captureRetrySuppressed,
+              !capture.isRunning,
+              !capture.isStarting,
+              permissionPollTimer == nil,
+              !permissionRequestActive else { return }
         guard CGPreflightScreenCaptureAccess() else {
+            permissionRequestActive = true
             let requested = CGRequestScreenCaptureAccess()
             showPermissionNotice(requested: requested)
             beginPermissionPolling()
             return
         }
+        permissionRequestActive = false
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
         startCapture()
     }
 
     private func beginPermissionPolling() {
-        permissionPollTimer?.invalidate()
+        guard permissionPollTimer == nil else { return }
         permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             guard let self else {
                 timer.invalidate()
                 return
             }
+            guard self.captureDemandActive else {
+                timer.invalidate()
+                self.permissionPollTimer = nil
+                return
+            }
             if CGPreflightScreenCaptureAccess() {
                 timer.invalidate()
                 self.permissionPollTimer = nil
+                self.permissionRequestActive = false
                 self.startCapture()
             }
         }
@@ -99,29 +119,34 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         alert.alertStyle = .informational
         alert.messageText = "需要屏幕录制权限"
         alert.informativeText = requested
-            ? "请在系统设置中允许 MacBook Duo Glass 录制屏幕。画面只在本机内存中用于实时渲染，不会保存或上传。授权后可重新打开应用。"
+            ? "请在系统设置中允许 MacBook Duo Glass 录制屏幕。画面只在本机内存中用于实时渲染，不会保存或上传。授权后返回应用，效果会自动继续。"
             : "请在“系统设置 → 隐私与安全性 → 屏幕录制”中允许此应用，然后点击菜单栏中的“重新检查屏幕录制权限”。"
         alert.addButton(withTitle: "知道了")
         alert.runModal()
     }
 
     private func startCapture() {
-        guard !capture.isRunning, !capture.isStarting else { return }
+        guard captureDemandActive, !capture.isRunning, !capture.isStarting else { return }
         // Register a transparent window before discovering our capture exclusion.
         if overlay == nil, let screen = builtInScreen() {
             overlay = OverlayWindow(screen: screen)
         }
         guard let overlay else { return }
+        let session = beginCaptureSession()
         lastFrame = nil
         isCaptureReady = false
+        captureError = nil
         overlay.alphaValue = 0
         overlay.orderFrontRegardless()
         capture.start(
             frameHandler: { [weak self] pixelBuffer in
-                self?.receiveFrame(pixelBuffer)
+                self?.receiveFrame(pixelBuffer, session: session)
             },
             stateHandler: { [weak self] result in
                 guard let self else { return }
+                guard self.isCurrentCaptureSession(session), self.captureDemandActive else {
+                    return
+                }
                 switch result {
                 case .success:
                     self.isCaptureReady = true
@@ -130,6 +155,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
                 case .failure(let error):
                     self.isCaptureReady = false
                     self.captureError = error.localizedDescription
+                    self.captureRetrySuppressed = true
                     NSLog("Duo capture failed: %@", error.localizedDescription)
                     self.hideOverlay()
                     self.presentErrorOnce(error)
@@ -138,35 +164,108 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         )
     }
 
+    private func stopCaptureForInactiveState() {
+        let hadCaptureState = captureDemandActive || capture.isRunning || capture.isStarting || isCaptureReady || lastFrame != nil || permissionPollTimer != nil
+        captureDemandActive = false
+        permissionRequestActive = false
+        captureRetrySuppressed = false
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
+        guard hadCaptureState else {
+            hideOverlay()
+            return
+        }
+        invalidateCaptureSession()
+        capture.stop()
+        isCaptureReady = false
+        captureError = nil
+        lastFrame = nil
+        overlay?.renderer.releaseFrameResources()
+        hideOverlay()
+    }
+
+    private func beginCaptureSession() -> Int {
+        frameLock.lock()
+        captureSessionID &+= 1
+        let session = captureSessionID
+        pendingFrame = nil
+        frameDeliveryScheduled = false
+        frameDeliverySession = 0
+        frameLock.unlock()
+        return session
+    }
+
+    private func invalidateCaptureSession() {
+        frameLock.lock()
+        captureSessionID &+= 1
+        pendingFrame = nil
+        frameDeliveryScheduled = false
+        frameDeliverySession = 0
+        frameLock.unlock()
+    }
+
+    private func isCurrentCaptureSession(_ session: Int) -> Bool {
+        frameLock.lock()
+        defer { frameLock.unlock() }
+        return captureSessionID == session
+    }
+
     private func receive(_ sample: AngleSample) {
         guard sample.isValid else {
             currentEffect = EffectModel.state(angle: 0, isValid: false)
-            hideOverlay()
+            stopCaptureForInactiveState()
             return
         }
 
         currentEffect = EffectModel.state(angle: sample.degrees)
-        updateOverlayIfNeeded()
+        updateCaptureDemand()
     }
 
-    private func receiveFrame(_ pixelBuffer: CVPixelBuffer) {
+    private func updateCaptureDemand() {
+        let shouldCapture = isEnabled && currentEffect.isValid && !currentEffect.isClear
+        if shouldCapture {
+            if !captureDemandActive {
+                captureDemandActive = true
+                permissionRequestActive = false
+                captureRetrySuppressed = false
+            }
+            requestOrStartCapture()
+            updateOverlayIfNeeded()
+        } else {
+            stopCaptureForInactiveState()
+        }
+    }
+
+    private func receiveFrame(_ pixelBuffer: CVPixelBuffer, session: Int) {
         // Coalesce capture callbacks. A slow render must never make the
         // ScreenCaptureKit queue back up or block the AppKit event loop.
         frameLock.lock()
+        guard captureSessionID == session else {
+            frameLock.unlock()
+            return
+        }
         pendingFrame = pixelBuffer
         if frameDeliveryScheduled {
             frameLock.unlock()
             return
         }
         frameDeliveryScheduled = true
+        frameDeliverySession = session
         frameLock.unlock()
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.frameLock.lock()
+            guard self.frameDeliveryScheduled,
+                  self.frameDeliverySession == session,
+                  self.captureSessionID == session else {
+                self.frameLock.unlock()
+                return
+            }
             let newestFrame = self.pendingFrame
             self.pendingFrame = nil
             self.frameDeliveryScheduled = false
+            self.frameDeliverySession = 0
             self.frameLock.unlock()
 
             guard let newestFrame else { return }
@@ -224,13 +323,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             self?.restartForDisplayChange()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.hideOverlay()
-            self?.capture.stop()
-            self?.isCaptureReady = false
+            self?.stopCaptureForInactiveState()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.lastFrame = nil
-            self?.startCapture()
+            self?.updateCaptureDemand()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             self?.lastFrame = nil
@@ -239,25 +336,19 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func restartForDisplayChange() {
-        hideOverlay()
-        lastFrame = nil
-        isCaptureReady = false
-        capture.stop()
-        startCapture()
+        stopCaptureForInactiveState()
+        updateCaptureDemand()
     }
 
     @objc private func toggleEnabled() {
         isEnabled.toggle()
-        if !isEnabled {
-            hideOverlay()
-        } else {
-            updateOverlayIfNeeded()
-        }
+        updateCaptureDemand()
         rebuildMenu()
     }
 
     @objc private func recheckPermission() {
-        requestOrStartCapture()
+        captureRetrySuppressed = false
+        updateCaptureDemand()
     }
 
     private func setThreshold(_ threshold: Double) {
@@ -265,18 +356,15 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         thresholdControl?.setThreshold(EffectModel.clearThreshold)
         guard currentEffect.isValid else { return }
         currentEffect = EffectModel.state(angle: currentEffect.angle)
-        if currentEffect.isClear {
-            hideOverlay()
-        } else {
-            updateOverlayIfNeeded()
-        }
+        updateCaptureDemand()
     }
 
     @objc private func showDiagnostics() {
         let screen = builtInScreen()
         let screenText = screen == nil ? "未找到" : "已找到"
-        let effectText = currentEffect.isClear ? "清晰（≥100°）" : currentEffect.isValid ? String(format: "效果中（%.1f°，强度 %.1f%%）", currentEffect.angle, currentEffect.intensity * 100) : "角度无效"
-        let captureText = isCaptureReady ? "已就绪（已排除自身进程）" : (captureError ?? "未就绪")
+        let thresholdText = String(format: "%.0f°", EffectModel.clearThreshold)
+        let effectText = currentEffect.isClear ? "清晰（≥\(thresholdText)）" : currentEffect.isValid ? String(format: "效果中（%.1f°，强度 %.1f%%）", currentEffect.angle, currentEffect.intensity * 100) : "角度无效"
+        let captureText = isCaptureReady ? "已就绪（已排除自身进程）" : captureDemandActive ? (captureError ?? "按需启动中") : "未进入阈值（未启动）"
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "MacBook Duo Glass 诊断"

@@ -32,6 +32,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
     private var renderAngle = RenderAngle()
     private var preparedSize: CGSize = .zero
     private var preparing = false
+    private var prepareGeneration = 0
     private var firstFramePending = true
     private var visibilityGeneration = 0
 
@@ -42,6 +43,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
               let reference = makeTexture(from: pixelBuffer),
               let source = CVMetalTextureGetTexture(reference),
               let command = commandQueue.makeCommandBuffer() else { return }
+        let generation = prepareGeneration
         preparing = true
         guard frostBlur.encode(source: source, strength: 0.01, maxSigma: 48, command: command) != nil else {
             preparing = false
@@ -52,8 +54,10 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
             withExtendedLifetime((reference, pixelBuffer)) {}
             let succeeded = finished.status == .completed
             DispatchQueue.main.async {
-                self?.preparing = false
-                if succeeded { self?.preparedSize = size }
+                guard let self else { return }
+                self.preparing = false
+                guard self.prepareGeneration == generation else { return }
+                if succeeded { self.preparedSize = size }
             }
         }
         command.commit()
@@ -129,6 +133,16 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         renderAngle.reset()
         visibilityGeneration += 1
         firstFramePending = true
+    }
+
+    func releaseFrameResources() {
+        prepareGeneration &+= 1
+        latestPixelBuffer = nil
+        filteredBuffer = nil
+        filteredTextures = nil
+        filteredIntensity = -1
+        preparedSize = .zero
+        resetAngleTransition()
     }
 
     func draw(in view: MTKView) {

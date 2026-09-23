@@ -23,6 +23,9 @@ struct EffectModel {
     static let minimumThreshold: Double = 75.0
     static let maximumThreshold: Double = 120.0
     static let defaultThreshold: Double = 100.0
+    // Higher values keep the effect softer just below the threshold and make
+    // it build faster as the lid approaches the closed position.
+    static let intensityCurve: Double = 3.0
     private static let thresholdKey = "effectStartAngleDegrees"
     private static var cachedThreshold: Double = {
         let stored = UserDefaults.standard.object(forKey: thresholdKey) as? NSNumber
@@ -72,22 +75,32 @@ struct EffectModel {
             )
         }
 
-        // The effect starts at exactly 100° with 0% strength and reaches
-        // 100% at 0°. No time-based easing is applied to this mapping.
-        let linearIntensity = Float(min(max((clearThreshold - clampedAngle) / clearThreshold, 0), 1))
+        // The effect starts at the selected threshold with 0% strength and
+        // reaches 100% at 0°. An exponential ease-in keeps the first part of
+        // the fold subtle, then increases the effect more quickly near 0°.
+        let progress = min(max((clearThreshold - clampedAngle) / clearThreshold, 0), 1)
+        let curvedIntensity = Float(intensity(forProgress: progress))
         return EffectState(
             angle: clampedAngle,
             isValid: true,
             isClear: false,
-            intensity: linearIntensity,
-            perspectiveDegrees: 55 * linearIntensity,
+            intensity: curvedIntensity,
+            perspectiveDegrees: 55 * curvedIntensity,
             // The shader applies intensity once while computing the
             // spatially varying radius. Keeping this as the maximum radius
             // avoids applying the fold curve twice.
             blurPixels: 48,
-            darken: 0.14 * linearIntensity,
-            milk: 0.045 * linearIntensity,
-            grain: 0.004 * linearIntensity
+            darken: 0.14 * curvedIntensity,
+            milk: 0.045 * curvedIntensity,
+            grain: 0.004 * curvedIntensity
         )
+    }
+
+    static func intensity(forProgress progress: Double) -> Double {
+        let clamped = min(max(progress, 0), 1)
+        guard clamped > 0 else { return 0 }
+        guard clamped < 1 else { return 1 }
+        let denominator = exp(intensityCurve) - 1
+        return (exp(intensityCurve * clamped) - 1) / denominator
     }
 }

@@ -5,15 +5,16 @@ A macOS menu bar app that applies an angle-driven frosted perspective effect to 
 ## Features
 
 - Configurable effect threshold from 75° to 120° (100° by default).
-- Continuous strength mapping: 0° is fully frosted and the threshold is clear.
+- Exponential strength curve: the effect starts softly and becomes stronger near 0°.
 - Metal rendering at a 60 Hz target.
+- Screen capture starts only while the effect is active.
 - Menu bar controls for pause, resume, and quit.
 
 ## Requirements
 
 - macOS 14 or later
 - Swift Package Manager and Command Line Tools
-- Screen Recording permission on first launch
+- Screen Recording permission when the effect is first activated
 
 ## Build and run
 
