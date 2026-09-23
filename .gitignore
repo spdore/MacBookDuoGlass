@@ -1,0 +1,11 @@
+.build/
+dist/
+.DS_Store
+*.xcuserstate
+
+# Local diagnostics and temporary render previews
+*.log
+*.png
+# Keep local design notes out of the public repository.
+*.md
+!README.md
