@@ -28,6 +28,10 @@ final class LidAngleSensor {
     private let invalidReadTimeout: CFTimeInterval = 0.25
     private let discoveryRetryInterval: CFTimeInterval = 0.25
     private let failuresBeforeReconnect = 3
+    // The renderer is locked to 60 Hz, so reading the lid sensor at the same
+    // cadence avoids waking the CPU several times for a value that cannot be
+    // displayed until the next refresh.
+    private let sampleInterval: DispatchTimeInterval = .microseconds(16_667)
 
     func start(handler: @escaping SampleHandler) {
         queue.async { [weak self] in
@@ -71,7 +75,7 @@ final class LidAngleSensor {
     private func installTimer() {
         timer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(5), leeway: .milliseconds(1))
+        timer.schedule(deadline: .now(), repeating: sampleInterval, leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in
             self?.readAndPublish()
         }
