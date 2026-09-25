@@ -14,6 +14,7 @@ bundle_id="com.spdor.MacBookDuoGlass"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$bin_dir/MacBookDuoGlass" "$app_dir/Contents/MacOS/MacBookDuoGlass"
 cp "$project_dir/AppInfo.plist" "$app_dir/Contents/Info.plist"
+cp "$project_dir/Resources/AppIcon.icns" "$app_dir/Contents/Resources/AppIcon.icns"
 
 chmod +x "$app_dir/Contents/MacOS/MacBookDuoGlass"
 # The Swift linker gives the executable an ad-hoc signature whose identifier is

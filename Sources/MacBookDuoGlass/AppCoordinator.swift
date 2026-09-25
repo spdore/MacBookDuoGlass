@@ -24,6 +24,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var frameDeliveryScheduled = false
     private var frameDeliverySession = 0
     private var captureSessionID = 0
+    private var lifecycleRestartScheduled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -329,18 +330,33 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private func installLifecycleObservers() {
         let center = NotificationCenter.default
         center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.restartForDisplayChange()
+            self?.scheduleLifecycleRestart()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.stopCaptureForInactiveState()
         }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.stopCaptureForInactiveState()
+        }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.lastFrame = nil
-            self?.updateCaptureDemand()
+            self?.scheduleLifecycleRestart()
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.scheduleLifecycleRestart()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.lastFrame = nil
-            self?.restartForDisplayChange()
+            self?.scheduleLifecycleRestart()
+        }
+    }
+
+    private func scheduleLifecycleRestart() {
+        guard !lifecycleRestartScheduled else { return }
+        lifecycleRestartScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lifecycleRestartScheduled = false
+            self.lastFrame = nil
+            self.restartForDisplayChange()
         }
     }
 

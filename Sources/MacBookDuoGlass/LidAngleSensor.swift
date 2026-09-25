@@ -12,12 +12,23 @@ final class LidAngleSensor {
     private var handler: SampleHandler?
     private var isRunning = false
     private var lastSuccessfulRead = CACurrentMediaTime()
+    private var consecutiveReadFailures = 0
+    private var nextDiscoveryAttempt = -Double.greatestFiniteMagnitude
+    private var hasPublishedInvalidSample = false
+
+    private let invalidReadTimeout: CFTimeInterval = 0.25
+    private let discoveryRetryInterval: CFTimeInterval = 0.25
+    private let failuresBeforeReconnect = 3
 
     func start(handler: @escaping SampleHandler) {
         queue.async { [weak self] in
             guard let self else { return }
             self.handler = handler
             self.isRunning = true
+            self.lastSuccessfulRead = CACurrentMediaTime()
+            self.consecutiveReadFailures = 0
+            self.hasPublishedInvalidSample = false
+            self.nextDiscoveryAttempt = -Double.greatestFiniteMagnitude
             self.discoverDeviceIfNeeded()
             self.installTimer()
             self.readAndPublish()
@@ -30,14 +41,7 @@ final class LidAngleSensor {
             self.isRunning = false
             self.timer?.cancel()
             self.timer = nil
-            if let device = self.device {
-                IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
-            }
-            self.device = nil
-            if let manager = self.manager {
-                IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-            }
-            self.manager = nil
+            self.closeSensorResources()
         }
     }
 
@@ -55,6 +59,18 @@ final class LidAngleSensor {
     private func discoverDeviceIfNeeded() {
         guard device == nil else { return }
 
+        let now = CACurrentMediaTime()
+        guard now >= nextDiscoveryAttempt else { return }
+        nextDiscoveryAttempt = now + discoveryRetryInterval
+
+        // A manager with no device can also become stale across sleep. Close
+        // it before creating a fresh one so the next attempt sees the
+        // post-wake HID device set and does not leak managers every 5 ms.
+        if let manager {
+            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+            self.manager = nil
+        }
+
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         self.manager = manager
 
@@ -69,10 +85,14 @@ final class LidAngleSensor {
         IOHIDManagerSetDeviceMatching(manager, matching)
 
         guard IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
+            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+            self.manager = nil
             return
         }
 
         guard let devices = IOHIDManagerCopyDevices(manager), CFSetGetCount(devices) > 0 else {
+            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+            self.manager = nil
             return
         }
 
@@ -102,10 +122,16 @@ final class LidAngleSensor {
 
             if result == kIOReturnSuccess, length >= 3 {
                 self.device = candidate
+                self.consecutiveReadFailures = 0
+                self.lastSuccessfulRead = now
+                self.hasPublishedInvalidSample = false
                 return
             }
             IOHIDDeviceClose(candidate, IOOptionBits(kIOHIDOptionsTypeNone))
         }
+
+        IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        self.manager = nil
     }
 
     private func readAndPublish() {
@@ -115,9 +141,7 @@ final class LidAngleSensor {
         }
 
         guard let device else {
-            if CACurrentMediaTime() - lastSuccessfulRead > 0.25 {
-                publish(.init(degrees: 0, rawValue: 0, timestamp: CACurrentMediaTime(), isValid: false))
-            }
+            publishInvalidIfNeeded()
             return
         }
 
@@ -134,14 +158,19 @@ final class LidAngleSensor {
         }
 
         guard result == kIOReturnSuccess, length >= 3 else {
-            if CACurrentMediaTime() - lastSuccessfulRead > 0.25 {
-                publish(.init(degrees: 0, rawValue: 0, timestamp: CACurrentMediaTime(), isValid: false))
+            consecutiveReadFailures += 1
+            if consecutiveReadFailures >= failuresBeforeReconnect {
+                closeSensorResources()
+                nextDiscoveryAttempt = CACurrentMediaTime() + discoveryRetryInterval
             }
+            publishInvalidIfNeeded()
             return
         }
 
         let raw = UInt16(report[1]) | (UInt16(report[2]) << 8)
         lastSuccessfulRead = CACurrentMediaTime()
+        consecutiveReadFailures = 0
+        hasPublishedInvalidSample = false
 
         // Firmware seen in the wild reports either degrees or hundredths of a
         // degree. The value range lets us choose safely for this sensor.
@@ -160,6 +189,25 @@ final class LidAngleSensor {
             timestamp: lastSuccessfulRead,
             isValid: true
         ))
+    }
+
+    private func publishInvalidIfNeeded() {
+        let now = CACurrentMediaTime()
+        guard now - lastSuccessfulRead > invalidReadTimeout,
+              !hasPublishedInvalidSample else { return }
+        hasPublishedInvalidSample = true
+        publish(.init(degrees: 0, rawValue: 0, timestamp: now, isValid: false))
+    }
+
+    private func closeSensorResources() {
+        if let device {
+            IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
+        }
+        self.device = nil
+        if let manager {
+            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        }
+        self.manager = nil
     }
 
     private func publish(_ sample: AngleSample) {
