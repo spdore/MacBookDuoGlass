@@ -15,7 +15,13 @@ final class LidAngleSensor {
     private var consecutiveReadFailures = 0
     private var nextDiscoveryAttempt = -Double.greatestFiniteMagnitude
     private var hasPublishedInvalidSample = false
-    // The HID timer is faster than the display link. Keep one pending sample
+    // Owned by the serial sensor queue; reuse storage for every HID request.
+    private let reportBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 8)
+
+    deinit {
+        reportBuffer.deallocate()
+    }
+    // Keep one pending sample
     // and deliver only the newest value to AppKit so stale angles cannot pile
     // up on the main queue.
     private let deliveryLock = NSLock()
@@ -172,17 +178,9 @@ final class LidAngleSensor {
             return
         }
 
-        var report = [UInt8](repeating: 0, count: 8)
-        var length = report.count
-        let result = report.withUnsafeMutableBytes { bytes in
-            IOHIDDeviceGetReport(
-                device,
-                kIOHIDReportTypeFeature,
-                CFIndex(1),
-                bytes.bindMemory(to: UInt8.self).baseAddress!,
-                &length
-            )
-        }
+        var length = 8
+        let result = IOHIDDeviceGetReport(
+            device, kIOHIDReportTypeFeature, CFIndex(1), reportBuffer, &length)
 
         guard result == kIOReturnSuccess, length >= 3 else {
             consecutiveReadFailures += 1
@@ -194,10 +192,14 @@ final class LidAngleSensor {
             return
         }
 
-        let raw = UInt16(report[1]) | (UInt16(report[2]) << 8)
+        let raw = UInt16(reportBuffer[1]) | (UInt16(reportBuffer[2]) << 8)
         lastSuccessfulRead = CACurrentMediaTime()
         consecutiveReadFailures = 0
         hasPublishedInvalidSample = false
+
+        // Always refresh device health above, including after a read failure.
+        // Unchanged valid reports need no conversion, sample or delivery work.
+        guard lastQueuedValidity != true || lastQueuedRawValue != raw else { return }
 
         // Firmware seen in the wild reports either degrees or hundredths of a
         // degree. The value range lets us choose safely for this sensor.
