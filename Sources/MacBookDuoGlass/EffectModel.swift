@@ -11,6 +11,7 @@ struct EffectState: Sendable {
     let angle: Double
     let isValid: Bool
     let isClear: Bool
+    let projectionOnly: Bool
     let intensity: Float
     let perspectiveDegrees: Float
     let blurPixels: Float
@@ -26,6 +27,7 @@ struct EffectModel {
     static let minimumIntensityCurve: Double = 0.0
     static let maximumIntensityCurve: Double = 4.0
     static let defaultIntensityCurve: Double = 1.7
+    static let adaptiveThresholdOffset: Double = 3.0
     // Higher values keep the effect softer just below the threshold and make
     // it build faster as the lid approaches the closed position.
     private static let intensityCurveKey = "effectIntensityCurve"
@@ -65,12 +67,23 @@ struct EffectModel {
         min(max(value, minimumIntensityCurve), maximumIntensityCurve)
     }
 
-    static func state(angle: Double, isValid: Bool = true) -> EffectState {
+    /// Returns the threshold proposed by the adaptive-angle mode. A common
+    /// angle at or below 75° is intentionally ignored; the built-in minimum
+    /// protects the display from treating a nearly closed lid as its clear
+    /// reference position.
+    static func adaptiveThreshold(for angle: Double) -> Double? {
+        guard angle.isFinite, angle > minimumThreshold else { return nil }
+        return clampThreshold(angle - adaptiveThresholdOffset)
+    }
+
+    static func state(angle: Double, isValid: Bool = true,
+                      projectionOnly: Bool = false) -> EffectState {
         guard isValid, angle.isFinite else {
             return EffectState(
                 angle: angle,
                 isValid: false,
                 isClear: false,
+                projectionOnly: projectionOnly,
                 intensity: 0,
                 perspectiveDegrees: 0,
                 blurPixels: 0,
@@ -86,6 +99,7 @@ struct EffectModel {
                 angle: clampedAngle,
                 isValid: true,
                 isClear: true,
+                projectionOnly: projectionOnly,
                 intensity: 0,
                 perspectiveDegrees: 0,
                 blurPixels: 0,
@@ -99,7 +113,7 @@ struct EffectModel {
         // reaches 100% at 0°. An exponential ease-in keeps the first part of
         // the fold subtle, then increases the effect more quickly near 0°.
         let progress = min(max((clearThreshold - clampedAngle) / clearThreshold, 0), 1)
-        let curvedIntensity = Float(intensity(forProgress: progress))
+        let curvedIntensity = projectionOnly ? 0 : Float(intensity(forProgress: progress))
         // Projection follows the physical fold linearly and reaches a maximum
         // equal to the selected activation angle. The curve is reserved for
         // the frosted material response, so changing its slider never changes
@@ -109,12 +123,13 @@ struct EffectModel {
             angle: clampedAngle,
             isValid: true,
             isClear: false,
+            projectionOnly: projectionOnly,
             intensity: curvedIntensity,
             perspectiveDegrees: perspectiveDegrees,
             // The shader applies intensity once while computing the
             // spatially varying radius. Keeping this as the maximum radius
             // avoids applying the fold curve twice.
-            blurPixels: 48,
+            blurPixels: projectionOnly ? 0 : 48,
             darken: 0.14 * curvedIntensity,
             milk: 0.045 * curvedIntensity,
             grain: 0.004 * curvedIntensity

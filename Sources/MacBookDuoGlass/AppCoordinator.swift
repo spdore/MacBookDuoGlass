@@ -10,7 +10,13 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var overlay: OverlayWindow?
     private var currentEffect = EffectModel.state(angle: 0, isValid: false)
     private var lastFrame: CVPixelBuffer?
+    private var lastAngleSample: AngleSample?
     private var isEnabled = true
+    private var hahaMirrorModeEnabled = false
+    private var adaptiveAngleEnabled = false
+    private var adaptiveAngleTimer: Timer?
+    private var adaptiveAngleTracker = AdaptiveAngleTracker()
+    private var manualThresholdBeforeAdaptive: Double?
     private var captureDemandActive = false
     private var isCaptureReady = false
     private var captureError: String?
@@ -19,6 +25,9 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     private var permissionRequestActive = false
     private weak var thresholdControl: ThresholdMenuView?
     private weak var curveControl: CurveMenuView?
+    private weak var enabledControl: ModeToggleMenuView?
+    private weak var hahaMirrorControl: ModeToggleMenuView?
+    private weak var adaptiveAngleControl: ModeToggleMenuView?
     private let frameLock = NSLock()
     private var pendingFrame: CVPixelBuffer?
     private var frameDeliveryScheduled = false
@@ -35,6 +44,7 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionPollTimer?.invalidate()
+        stopAdaptiveAngleObservation()
         stopCaptureForInactiveState()
         sensor.stop()
         hideOverlay()
@@ -49,8 +59,41 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     private func rebuildMenu() {
         let menu = NSMenu()
-        let toggleTitle = isEnabled ? "暂停效果" : "启用效果"
-        menu.addItem(NSMenuItem(title: toggleTitle, action: #selector(toggleEnabled), keyEquivalent: ""))
+        let enabledControl = ModeToggleMenuView(
+            title: "启用效果",
+            isOn: isEnabled,
+            toolTip: "控制屏幕效果总开关")
+        enabledControl.onChange = { [weak self] isOn in
+            self?.setEnabled(isOn)
+        }
+        let enabledItem = NSMenuItem()
+        enabledItem.view = enabledControl
+        menu.addItem(enabledItem)
+        self.enabledControl = enabledControl
+
+        let hahaMirrorControl = ModeToggleMenuView(
+            title: "哈哈镜模式",
+            isOn: hahaMirrorModeEnabled,
+            toolTip: "只改变折叠透视角度，不使用模糊、磨砂、反射和色散")
+        hahaMirrorControl.onChange = { [weak self] isOn in
+            self?.setHahaMirrorMode(isOn)
+        }
+        let hahaMirrorItem = NSMenuItem()
+        hahaMirrorItem.view = hahaMirrorControl
+        menu.addItem(hahaMirrorItem)
+        self.hahaMirrorControl = hahaMirrorControl
+
+        let adaptiveAngleControl = ModeToggleMenuView(
+            title: "自适应角度",
+            isOn: adaptiveAngleEnabled,
+            toolTip: "固定角度超过 3 秒后，以当前角度减 3°作为启动阈值（最低 75°）")
+        adaptiveAngleControl.onChange = { [weak self] isOn in
+            self?.setAdaptiveAngle(isOn)
+        }
+        let adaptiveAngleItem = NSMenuItem()
+        adaptiveAngleItem.view = adaptiveAngleControl
+        menu.addItem(adaptiveAngleItem)
+        self.adaptiveAngleControl = adaptiveAngleControl
         menu.addItem(NSMenuItem.separator())
         let thresholdControl = ThresholdMenuView(threshold: EffectModel.clearThreshold)
         thresholdControl.onChange = { [weak self] threshold in
@@ -221,13 +264,20 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func receive(_ sample: AngleSample) {
+        lastAngleSample = sample
         guard sample.isValid else {
+            adaptiveAngleTracker.reset()
             currentEffect = EffectModel.state(angle: 0, isValid: false)
             stopCaptureForInactiveState()
             return
         }
 
-        currentEffect = EffectModel.state(angle: sample.degrees)
+        if adaptiveAngleEnabled {
+            adaptiveAngleTracker.accept(sample)
+            evaluateAdaptiveAngle(at: sample.timestamp)
+        }
+        currentEffect = EffectModel.state(angle: sample.degrees,
+                                          projectionOnly: hahaMirrorModeEnabled)
         updateCaptureDemand()
     }
 
@@ -366,9 +416,55 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         updateCaptureDemand()
     }
 
-    @objc private func toggleEnabled() {
-        isEnabled.toggle()
+    private func setEnabled(_ enabled: Bool) {
+        guard isEnabled != enabled else { return }
+        isEnabled = enabled
         updateCaptureDemand()
+        rebuildMenu()
+    }
+
+    private func setHahaMirrorMode(_ enabled: Bool) {
+        guard hahaMirrorModeEnabled != enabled else { return }
+        hahaMirrorModeEnabled = enabled
+        currentEffect = EffectModel.state(
+            angle: currentEffect.angle,
+            isValid: currentEffect.isValid,
+            projectionOnly: hahaMirrorModeEnabled)
+        updateCaptureDemand()
+        rebuildMenu()
+    }
+
+    private func setAdaptiveAngle(_ enabled: Bool) {
+        guard adaptiveAngleEnabled != enabled else { return }
+        adaptiveAngleEnabled = enabled
+        if adaptiveAngleEnabled {
+            manualThresholdBeforeAdaptive = EffectModel.clearThreshold
+            adaptiveAngleTracker.reset()
+            if let lastAngleSample, lastAngleSample.isValid {
+                // Start the three-second interval when the user enables the
+                // option, even if the sensor has not changed since then.
+                adaptiveAngleTracker.accept(.init(
+                    degrees: lastAngleSample.degrees,
+                    rawValue: lastAngleSample.rawValue,
+                    timestamp: CACurrentMediaTime(),
+                    isValid: true
+                ))
+            }
+            startAdaptiveAngleObservation()
+        } else {
+            stopAdaptiveAngleObservation()
+            if let manualThreshold = manualThresholdBeforeAdaptive {
+                EffectModel.clearThreshold = manualThreshold
+                thresholdControl?.setThreshold(manualThreshold)
+                if currentEffect.isValid {
+                    currentEffect = EffectModel.state(
+                        angle: currentEffect.angle,
+                        projectionOnly: hahaMirrorModeEnabled)
+                    updateCaptureDemand()
+                }
+            }
+            manualThresholdBeforeAdaptive = nil
+        }
         rebuildMenu()
     }
 
@@ -379,9 +475,16 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
 
     private func setThreshold(_ threshold: Double) {
         EffectModel.clearThreshold = threshold
+        if adaptiveAngleEnabled {
+            // A manual slider change remains the value restored when the
+            // adaptive mode is turned off.
+            manualThresholdBeforeAdaptive = threshold
+        }
         thresholdControl?.setThreshold(EffectModel.clearThreshold)
         guard currentEffect.isValid else { return }
-        currentEffect = EffectModel.state(angle: currentEffect.angle)
+        currentEffect = EffectModel.state(
+            angle: currentEffect.angle,
+            projectionOnly: hahaMirrorModeEnabled)
         updateCaptureDemand()
     }
 
@@ -389,7 +492,38 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         EffectModel.intensityCurve = curve
         curveControl?.setCurve(EffectModel.intensityCurve)
         guard currentEffect.isValid else { return }
-        currentEffect = EffectModel.state(angle: currentEffect.angle)
+        currentEffect = EffectModel.state(
+            angle: currentEffect.angle,
+            projectionOnly: hahaMirrorModeEnabled)
+        updateCaptureDemand()
+    }
+
+    private func startAdaptiveAngleObservation() {
+        adaptiveAngleTimer?.invalidate()
+        adaptiveAngleTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.evaluateAdaptiveAngle(at: CACurrentMediaTime())
+        }
+    }
+
+    private func stopAdaptiveAngleObservation() {
+        adaptiveAngleTimer?.invalidate()
+        adaptiveAngleTimer = nil
+        adaptiveAngleTracker.reset()
+    }
+
+    private func evaluateAdaptiveAngle(at time: CFTimeInterval) {
+        guard adaptiveAngleEnabled,
+              currentEffect.isValid,
+              let threshold = adaptiveAngleTracker.thresholdIfReady(at: time) else { return }
+        guard abs(EffectModel.clearThreshold - threshold) > 0.01 else {
+            thresholdControl?.setThreshold(threshold)
+            return
+        }
+        EffectModel.clearThreshold = threshold
+        thresholdControl?.setThreshold(threshold)
+        currentEffect = EffectModel.state(
+            angle: currentEffect.angle,
+            projectionOnly: hahaMirrorModeEnabled)
         updateCaptureDemand()
     }
 
@@ -399,10 +533,11 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         let thresholdText = String(format: "%.0f°", EffectModel.clearThreshold)
         let effectText = currentEffect.isClear ? "清晰（≥\(thresholdText)）" : currentEffect.isValid ? String(format: "效果中（%.1f°，强度 %.1f%%）", currentEffect.angle, currentEffect.intensity * 100) : "角度无效"
         let captureText = isCaptureReady ? "已就绪（已排除自身进程）" : captureDemandActive ? (captureError ?? "按需启动中") : "未进入阈值（未启动）"
+        let adaptiveText = adaptiveAngleEnabled ? "\n自适应角度：已开启（静止 3 秒，最低 75°）" : ""
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "MacBook Duo Glass 诊断"
-        alert.informativeText = "内置显示器：\(screenText)\n屏幕采集：\(captureText)\n当前状态：\(effectText)\n\n屏幕画面只用于内存中的实时渲染。"
+        alert.informativeText = "内置显示器：\(screenText)\n屏幕采集：\(captureText)\n当前状态：\(effectText)\(adaptiveText)\n\n屏幕画面只用于内存中的实时渲染。"
         alert.addButton(withTitle: "关闭")
         alert.runModal()
     }

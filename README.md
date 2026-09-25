@@ -1,33 +1,93 @@
 # MacBook Duo Glass
 
-A macOS menu bar app that applies an angle-driven frosted perspective effect to the built-in display.
+一个运行在 macOS 菜单栏的 MacBook 开合透视磨砂效果工具。应用读取屏幕开合角度，在需要时采集内置屏幕并用 Metal 实时渲染，画面只在本机内存中处理。
 
-## Features
+## 功能
 
-- Configurable effect threshold from 75° to 120° (100° by default).
-- Exponential strength curve: the effect starts softly and becomes stronger near 0°.
-- Status bar sliders for the threshold and curve parameter; settings are persisted.
-- Metal rendering at a 60 Hz target.
-- Screen capture starts only while the effect is active.
-- Menu bar controls for pause, resume, and quit.
+- 根据开合角度自动启用或停用效果，启动角度可在 `75°–120°` 之间设置，默认值为 `100°`。
+- 透视投影随实际角度连续变化；磨砂强度使用可调的指数曲线，角度越小效果越强。
+- 玻璃材质包含空间变化模糊、方向性反射、透光率变化、红蓝通道色散、铰链附近高光、黑色渐隐、边缘柔化和运动散射。
+- “哈哈镜模式”只保留透视投影，不使用磨砂、模糊、反射和色散。
+- “自适应角度”会在角度稳定超过 3 秒后，将当前角度减 `3°` 设为启动阈值；内置最低阈值为 `75°`。
+- 菜单栏提供效果开关、两个模式开关、启动角度滑块、曲线参数滑块、诊断信息和权限重新检查。
+- 传感器和渲染目标为 60 Hz；只有进入效果区间后才启动屏幕采集，离开后立即停止，以减少日常资源占用。
+- 自动处理睡眠、唤醒和显示器变化；采集时排除应用自身窗口，避免画面递归。
 
-## Requirements
+## 适配范围
 
-- macOS 14 or later
-- Swift Package Manager and Command Line Tools
-- Screen Recording permission when the effect is first activated
+- macOS 14 Sonoma 或更高版本。
+- 配备内置屏幕和兼容开合角度 HID 传感器的 Apple Silicon MacBook Air / MacBook Pro。
+- 需要使用 MacBook 自带屏幕；外接显示器、台式 Mac 和没有兼容传感器的 Intel Mac 不在当前实现的保证范围内。
+- 受 macOS 屏幕采集规则影响，锁屏、受保护视频和部分系统全屏内容可能无法被处理。
 
-## Build and run
+## 安装
+
+仓库目前提供源码构建方式，不附带绑定本机签名或本机路径的预编译包。
+
+### 1. 准备环境
+
+1. 确认系统为 macOS 14 或更高版本。
+2. 安装 Apple 的 Command Line Tools：
+
+   ```sh
+   xcode-select --install
+   ```
+
+3. 安装完成后，在终端确认 Swift 可用：
+
+   ```sh
+   swift --version
+   ```
+
+### 2. 获取源码并构建
+
+在终端执行：
 
 ```sh
+git clone https://github.com/spdore/MacBookDuoGlass.git
+cd MacBookDuoGlass
 ./scripts/build_app.sh
-open dist/MacBookDuoGlass.app
 ```
 
-Run the local self-test with:
+构建脚本会编译 Release 版本，生成 `dist/MacBookDuoGlass.app`，并为应用包生成 macOS 可识别的签名。`dist/` 是本地构建目录，不需要提交到 Git。
+
+### 3. 安装到“应用程序”
+
+1. 打开项目中的 `dist` 文件夹。
+2. 将 `MacBookDuoGlass.app` 拖到 Finder 的“应用程序”文件夹。
+3. 如果电脑上运行过旧版本，先从菜单栏退出旧版本，再只从“应用程序”文件夹打开新版，避免同时运行两个副本。
+4. 首次打开时，如果 macOS 提示无法验证开发者，请在 Finder 中右键该应用，选择“打开”，再确认一次。也可以在“系统设置 → 隐私与安全性”底部点击“仍要打开”。
+
+### 4. 授予屏幕录制权限
+
+屏幕录制权限用于读取当前显示内容并生成实时效果。应用不会保存、上传或发送屏幕画面，也不会请求摄像头、麦克风或辅助功能权限。
+
+1. 打开“系统设置 → 隐私与安全性 → 屏幕录制”。
+2. 在列表中启用 **MacBook Duo Glass**。
+3. 如果系统要求重新打开应用，选择“退出并重新打开”；如果没有自动重启，手动退出后再次打开。
+4. 回到菜单栏，确认应用菜单中的“显示诊断”显示屏幕采集已就绪。
+5. 屏幕采集只会在当前角度低于启动阈值、且效果开关已开启时启动；角度回到阈值以上后会停止。
+
+如果列表中同时存在旧副本，请先退出所有旧副本，再关闭旧条目、打开当前“应用程序”文件夹中的副本并重新授权。权限绑定的是应用签名身份，不要从多个不同位置交替启动同名副本。
+
+### 5. 使用效果
+
+1. 点击菜单栏中的 **Duo**。
+2. 用“启动角度”滑块选择 `75°–120°` 的阈值。
+3. 用“效果曲线”滑块调整磨砂效果从弱到强的变化速度；该参数不改变透视投影上限。
+4. 需要只观察透视变化时打开“哈哈镜模式”。
+5. 需要让应用学习常用开合角度时打开“自适应角度”，保持屏幕在目标角度静止至少 3 秒。
+
+### 6. 可选自测
+
+在项目目录运行：
 
 ```sh
 swift run -c debug MacBookDuoGlass --self-test
 ```
 
-The app processes the built-in display only. Lock screens, protected content, and some system full-screen surfaces follow macOS capture restrictions. Screen content is processed in memory and is not saved or uploaded.
+自测会检查角度映射、阈值范围、Metal 渲染、屏幕采集权限和开合角度传感器状态。
+
+## 卸载
+
+退出菜单栏应用后，将“应用程序”中的 `MacBookDuoGlass.app` 移到废纸篓即可。若不再使用屏幕采集功能，可在“系统设置 → 隐私与安全性 → 屏幕录制”中关闭对应权限。

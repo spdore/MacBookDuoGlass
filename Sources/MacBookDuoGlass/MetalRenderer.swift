@@ -13,6 +13,10 @@ struct DuoUniforms {
     var grain: Float
     var aspect: Float
     var time: Float
+    // Smoothed physical lid speed in degrees per second. The fragment shader
+    // uses this only for a short motion-scattering contribution while the
+    // lid is moving.
+    var motionSpeed: Float
 }
 
 final class DuoMetalView: MTKView, MTKViewDelegate {
@@ -20,7 +24,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
     private let pipeline: MTLRenderPipelineState
     private let textureCache: CVMetalTextureCache
     private var latestPixelBuffer: CVPixelBuffer?
-    private var parameters = EffectState(angle: 90, isValid: true, isClear: true, intensity: 0, perspectiveDegrees: 0, blurPixels: 0, darken: 0, milk: 0, grain: 0)
+    private var parameters = EffectState(angle: 90, isValid: true, isClear: true, projectionOnly: false, intensity: 0, perspectiveDegrees: 0, blurPixels: 0, darken: 0, milk: 0, grain: 0)
     private var startTime = CACurrentMediaTime()
     private let inFlight = DispatchSemaphore(value: 2)
     private var fpsWindowStart = CACurrentMediaTime()
@@ -35,6 +39,9 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
     private var prepareGeneration = 0
     private var firstFramePending = true
     private var visibilityGeneration = 0
+    private var lastRenderedAngle: Double?
+    private var lastRenderedTime: CFTimeInterval?
+    private var smoothedMotionSpeed: Float = 0
 
     // Run allocation and first MPS dispatch while the desktop is still clear.
     func prepare(_ pixelBuffer: CVPixelBuffer) {
@@ -131,6 +138,9 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
 
     func resetAngleTransition() {
         renderAngle.reset()
+        lastRenderedAngle = nil
+        lastRenderedTime = nil
+        smoothedMotionSpeed = 0
         visibilityGeneration += 1
         firstFramePending = true
     }
@@ -147,11 +157,15 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard !preparing, preparedSize != .zero else { return }
+        let now = CACurrentMediaTime()
+        let displayedAngle = renderAngle.value(at: now) ?? self.parameters.angle
+        updateMotionSpeed(angle: displayedAngle, time: now)
         // Evaluate continuous Double angles at display cadence. The hardware
         // can still report integers; no rounding is introduced here.
         let parameters = EffectModel.state(
-            angle: renderAngle.value(at: CACurrentMediaTime()) ?? self.parameters.angle,
-            isValid: self.parameters.isValid)
+            angle: displayedAngle,
+            isValid: self.parameters.isValid,
+            projectionOnly: self.parameters.projectionOnly)
         guard inFlight.wait(timeout: .now()) == .success else { return }
         var submitted = false
         defer { if !submitted { inFlight.signal() } }
@@ -187,7 +201,8 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
                 milk: parameters.milk,
                 grain: parameters.grain,
                 aspect: Float(drawableSize.width / max(drawableSize.height, 1)),
-                time: Float(CACurrentMediaTime() - startTime)
+                time: Float(now - startTime),
+                motionSpeed: smoothedMotionSpeed
             )
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DuoUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -213,12 +228,35 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         submitted = true
         commandBuffer.commit()
         submittedFrames += 1
-        let now = CACurrentMediaTime()
-        if now - fpsWindowStart >= 1 {
+        let fpsNow = CACurrentMediaTime()
+        if fpsNow - fpsWindowStart >= 1 {
             NSLog("Duo render: %d submitted frames/s", submittedFrames)
-            fpsWindowStart = now
+            fpsWindowStart = fpsNow
             submittedFrames = 0
         }
+    }
+
+    private func updateMotionSpeed(angle: Double, time: CFTimeInterval) {
+        defer {
+            lastRenderedAngle = angle
+            lastRenderedTime = time
+        }
+        guard let previousAngle = lastRenderedAngle,
+              let previousTime = lastRenderedTime else {
+            smoothedMotionSpeed = 0
+            return
+        }
+        let deltaTime = time - previousTime
+        guard deltaTime > 0, deltaTime < 0.25 else {
+            smoothedMotionSpeed = 0
+            return
+        }
+        // The render angle is already eased over 40 ms. A second, faster
+        // low-pass keeps the shader response continuous without making a
+        // single sensor sample produce a visible jump.
+        let rawSpeed = min(abs(angle - previousAngle) / deltaTime, 1440)
+        let response = 1 - exp(-deltaTime / 0.06)
+        smoothedMotionSpeed += (Float(rawSpeed) - smoothedMotionSpeed) * Float(response)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -255,6 +293,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         float grain;
         float aspect;
         float time;
+        float motionSpeed;
     };
 
     struct VertexOut {
@@ -293,29 +332,153 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         constexpr sampler linearSampler(address::clamp_to_edge, filter::linear);
 
         float2 outputUV = in.uv;
-        float modelY = 1.0 - outputUV.y;
+        // modelY is the normalized distance from the hinge: 0 at the hinge,
+        // 1 at the far edge of the folded display.
+        float modelY = clamp(1.0 - outputUV.y, 0.0, 1.0);
         float phi = u.perspectiveDegrees * 0.017453292519943295;
-        float yGlass = modelY * cos(phi);
-        float zGlass = modelY * sin(phi);
+        float sinPhi = sin(phi);
+        float cosPhi = cos(phi);
+        float foldAmount = clamp(abs(sinPhi), 0.0, 1.0);
+        float yGlass = modelY * cosPhi;
+        float zGlass = modelY * sinPhi;
         float3 eye = float3(0.0, 0.5, 2.5);
         float3 glassPoint = float3((outputUV.x - 0.5) * u.aspect, yGlass, zGlass);
         float denominator = glassPoint.z - eye.z;
         float lambda = denominator == 0.0 ? -1.0 : -eye.z / denominator;
         float3 intersection = eye + lambda * (glassPoint - eye);
-        float2 sourceUV = float2(intersection.x / max(u.aspect, 0.001) + 0.5, 1.0 - intersection.y);
-        sourceUV = clamp(sourceUV, float2(0.0), float2(1.0));
+        // Keep the unbounded coordinate for the edge mask, then clamp only
+        // the texture lookup. This makes projected regions fade to real black
+        // instead of smearing the nearest edge pixel across the screen.
+        float2 projectedUV = float2(intersection.x / max(u.aspect, 0.001) + 0.5,
+                                    1.0 - intersection.y);
+        float2 sourceUV = clamp(projectedUV, float2(0.0), float2(1.0));
 
         float verticalGradient = 0.35 + 0.65 * modelY;
-        // Sample both filtered images at the SAME perspective coordinate:
-        // no displaced copies and no sharp image leaking through the frost.
-        float4 color = mix(source.sample(linearSampler, sourceUV),
-                           strongBlur.sample(linearSampler, sourceUV), modelY);
+        // The sharp and blurred buffers use the SAME projected coordinate.
+        // The blur mix therefore remains a glass material response and never
+        // creates the old displaced double-image artifact.
+        float4 sharpSample = source.sample(linearSampler, sourceUV);
+        float4 blurSample = strongBlur.sample(linearSampler, sourceUV);
+        float4 color = mix(sharpSample, blurSample, modelY);
+
+        // 1) Distance-dependent transmission. Light is transmitted most
+        // strongly near the hinge and attenuates toward the free edge.
+        float opticalDistance = modelY * (0.35 + 0.65 * foldAmount);
+        float distanceTransmission = exp(-0.65 * opticalDistance);
+        float transmissionAmount = foldAmount * u.intensity * (0.18 + 0.38 * u.intensity);
+        float transmission = mix(1.0, distanceTransmission,
+                                 clamp(transmissionAmount, 0.0, 0.62));
+        color.rgb *= transmission;
+
+        // 7) Motion scattering. RenderAngle supplies a smoothed degrees/sec
+        // value, so this is active only during a real lid movement and fades
+        // out continuously instead of toggling per sensor sample.
+        float motionFactor = smoothstep(60.0, 520.0, abs(u.motionSpeed));
+        float motionRadius = (0.0015 + 0.0055 * modelY) * motionFactor *
+                              u.intensity;
+        if (motionRadius > 0.00001) {
+            float2 motionOffset = float2(0.0, motionRadius);
+            float4 motionA = mix(source.sample(linearSampler,
+                                               clamp(sourceUV - motionOffset,
+                                                     float2(0.0), float2(1.0))),
+                                  strongBlur.sample(linearSampler,
+                                                    clamp(sourceUV - motionOffset,
+                                                          float2(0.0), float2(1.0))),
+                                  modelY);
+            float4 motionB = mix(source.sample(linearSampler,
+                                               clamp(sourceUV + motionOffset,
+                                                     float2(0.0), float2(1.0))),
+                                  strongBlur.sample(linearSampler,
+                                                    clamp(sourceUV + motionOffset,
+                                                          float2(0.0), float2(1.0))),
+                                  modelY);
+            float motionBlend = 0.10 * motionFactor * u.intensity;
+            color.rgb = mix(color.rgb, 0.5 * (motionA.rgb + motionB.rgb), motionBlend);
+        }
+
+        // 4) Small red/blue offsets create chromatic dispersion without
+        // shifting the green channel or changing the projected geometry.
+        float2 dispersionDirection = normalize(float2((outputUV.x - 0.5) * 0.75,
+                                                       -max(modelY, 0.08)));
+        float dispersion = 0.0009 * u.intensity * foldAmount * pow(modelY, 1.25);
+        if (dispersion > 0.00002) {
+            float2 redUV = clamp(sourceUV + dispersionDirection * dispersion,
+                                 float2(0.0), float2(1.0));
+            float2 blueUV = clamp(sourceUV - dispersionDirection * dispersion,
+                                  float2(0.0), float2(1.0));
+            float4 redSharp = source.sample(linearSampler, redUV);
+            float4 redBlur = strongBlur.sample(linearSampler, redUV);
+            float4 blueSharp = source.sample(linearSampler, blueUV);
+            float4 blueBlur = strongBlur.sample(linearSampler, blueUV);
+            float3 dispersed = color.rgb;
+            dispersed.r = mix(redSharp.r, redBlur.r, modelY) * transmission;
+            dispersed.b = mix(blueSharp.b, blueBlur.b, modelY) * transmission;
+            color.rgb = mix(color.rgb, dispersed, 0.82);
+        }
 
         float shading = u.darken * verticalGradient;
         color.rgb *= 1.0 - shading;
         color.rgb = mix(color.rgb, float3(0.96, 0.97, 1.0), u.milk * verticalGradient);
-        float noise = (hash21(outputUV * 1024.0) - 0.5) * u.grain;
-        color.rgb += noise;
+
+        // 2) Directional reflection: a view/light-dependent specular term and
+        // a broad moving sheen make the surface read as glass rather than a
+        // uniform white overlay.
+        float3 normal = normalize(float3(0.0, -sinPhi, cosPhi));
+        float3 viewDirection = normalize(eye - glassPoint);
+        float3 lightDirection = normalize(float3(-0.35, 0.65, 1.0));
+        float3 halfDirection = normalize(lightDirection + viewDirection);
+        float specular = pow(max(dot(normal, halfDirection), 0.0), 28.0);
+        float fresnel = pow(1.0 - max(dot(normal, viewDirection), 0.0), 3.0);
+        float sheenCenter = 0.25 + 0.18 * sin(phi * 1.3);
+        float sheen = exp(-pow((outputUV.x - sheenCenter) / 0.28, 2.0));
+        float reflectionMask = smoothstep(0.06, 0.92, modelY) *
+                               (0.35 + 0.65 * foldAmount);
+        float reflection = u.intensity * reflectionMask *
+                           (0.026 * specular + 0.012 * fresnel + 0.022 * sheen);
+        color.rgb += float3(0.82, 0.92, 1.0) * reflection;
+
+        // 1) Narrow contact highlight where the glass meets the hinge.
+        float contactBand = 1.0 - smoothstep(0.0, 0.085, modelY);
+        float contactSpecular = pow(max(dot(normal, viewDirection), 0.0), 6.0);
+        float contact = u.intensity * foldAmount * contactBand *
+                        (0.018 + 0.035 * contactSpecular);
+        color.rgb += float3(0.86, 0.94, 1.0) * contact;
+
+        // 5) True fade to black as the projected surface recedes from the
+        // hinge. The mask is based on the unbounded projection, so out-of-
+        // bounds pixels also become black instead of edge-clamped copies.
+        float signedEdgeDistance = min(min(projectedUV.x, 1.0 - projectedUV.x),
+                                       min(projectedUV.y, 1.0 - projectedUV.y));
+        float edgeFeather = (0.004 + 0.026 * u.intensity) *
+                            (0.70 + 0.30 * modelY);
+        // A steep fold can place the whole projected plane a small distance
+        // beyond the source rectangle. Using a narrow signed-edge smoothstep
+        // here would turn every pixel black at roughly 79°. Give the outside
+        // region a perceptual falloff instead: shallow overshoot remains a
+        // translucent edge, while a genuinely distant projection still fades
+        // to black.
+        float outsideDepth = max(-signedEdgeDistance, 0.0);
+        float outsideFadeRange = 0.20 + 0.20 * foldAmount *
+                                 (0.65 + 0.35 * u.intensity);
+        float insideShape = 0.66 +
+                            0.34 * smoothstep(0.0, edgeFeather,
+                                              max(signedEdgeDistance, 0.0));
+        float outsideShape = 0.66 *
+                             (1.0 - smoothstep(0.0, outsideFadeRange,
+                                               outsideDepth));
+        float edgeShape = signedEdgeDistance >= 0.0 ? insideShape : outsideShape;
+        float edgeActivation = smoothstep(0.001, 0.18, u.intensity);
+
+        // 6) Softened glass edge. It activates gradually so the clear state
+        // remains pixel-identical at the selected threshold.
+        float edgeCoverage = mix(1.0, edgeShape, edgeActivation);
+        float distanceFade = smoothstep(0.18, 1.0, modelY);
+        float blackFade = clamp(0.32 * u.intensity * foldAmount * distanceFade,
+                                0.0, 0.72);
+        color.rgb *= edgeCoverage * (1.0 - blackFade);
+
+        float noise = (hash21(outputUV * 1024.0 + float2(u.time)) - 0.5) * u.grain;
+        color.rgb += noise * edgeCoverage;
         color.a = 1.0;
         return color;
     }

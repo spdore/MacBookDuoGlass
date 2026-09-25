@@ -25,6 +25,30 @@ enum SelfTest {
         }
         print("Threshold range: 75°–120° (ok)")
 
+        guard EffectModel.adaptiveThreshold(for: 75) == nil,
+              EffectModel.adaptiveThreshold(for: 74) == nil,
+              EffectModel.adaptiveThreshold(for: 76) == 75,
+              EffectModel.adaptiveThreshold(for: 100) == 97,
+              EffectModel.adaptiveThreshold(for: 180) == 120 else {
+            print("Adaptive threshold guard: failed")
+            return 1
+        }
+        var adaptiveTracker = AdaptiveAngleTracker()
+        adaptiveTracker.accept(.init(degrees: 100, rawValue: 10_000, timestamp: 0, isValid: true))
+        guard adaptiveTracker.thresholdIfReady(at: 2.99) == nil,
+              adaptiveTracker.thresholdIfReady(at: 3.0) == 97,
+              adaptiveTracker.thresholdIfReady(at: 4.0) == nil else {
+            print("Adaptive stationary hold: failed")
+            return 1
+        }
+        adaptiveTracker.accept(.init(degrees: 110, rawValue: 11_000, timestamp: 4, isValid: true))
+        guard adaptiveTracker.thresholdIfReady(at: 6.99) == nil,
+              adaptiveTracker.thresholdIfReady(at: 7.0) == 107 else {
+            print("Adaptive movement reset: failed")
+            return 1
+        }
+        print("Adaptive threshold: >75°, 3 s hold, angle−3° with 75° floor (ok)")
+
         guard EffectModel.clampIntensityCurve(-1) == EffectModel.minimumIntensityCurve,
               EffectModel.clampIntensityCurve(5) == EffectModel.maximumIntensityCurve,
               EffectModel.clampIntensityCurve(1.7) == 1.7 else {
@@ -38,6 +62,19 @@ enum SelfTest {
         let mappingOK = abs(at100 - 0.0) < 0.0001 && abs(at0 - 1.0) < 0.0001
         print(String(format: "Angle mapping: 100°=%.2f, 0°=%.2f (%@)", at100, at0, mappingOK ? "ok" : "failed"))
         guard mappingOK else { return 1 }
+        let projectionOnlyState = EffectModel.state(angle: 45, projectionOnly: true)
+        guard !projectionOnlyState.isClear,
+              projectionOnlyState.projectionOnly,
+              projectionOnlyState.intensity == 0,
+              projectionOnlyState.blurPixels == 0,
+              projectionOnlyState.darken == 0,
+              projectionOnlyState.milk == 0,
+              projectionOnlyState.grain == 0,
+              abs(projectionOnlyState.perspectiveDegrees - 55) < 0.0001 else {
+            print("Haha mirror projection-only state: failed")
+            return 1
+        }
+        print("Haha mirror mode: projection only, no material effect (ok)")
         var previous: Float = 1
         for angle in stride(from: 0.0, through: 100.0, by: 0.5) {
             let state = EffectModel.state(angle: angle)
@@ -190,7 +227,7 @@ enum SelfTest {
             encoder.setFragmentTexture(images[1], index: 1)
             var uniforms = DuoUniforms(intensity: state.intensity, perspectiveDegrees: isolateBlur ? 0 : state.perspectiveDegrees,
                 blurPixels: state.blurPixels, darken: isolateBlur ? 0 : state.darken, milk: isolateBlur ? 0 : state.milk,
-                grain: isolateBlur ? 0 : state.grain, aspect: 1, time: 0)
+                grain: isolateBlur ? 0 : state.grain, aspect: 1, time: 0, motionSpeed: 0)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DuoUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
@@ -262,7 +299,7 @@ enum SelfTest {
             source.replace(region: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0,
                 withBytes: $0.baseAddress!, bytesPerRow: size * 4)
         }
-        for angle in [100.0, 90, 60] {
+        for angle in [100.0, 90, 60, 40, 20, 0] {
             guard var preview = render(angle) else { return false }
             preview.withUnsafeMutableBytes { bytes in
                 guard let context = CGContext(data: bytes.baseAddress, width: size, height: size,
@@ -334,7 +371,7 @@ enum SelfTest {
             encoder.setFragmentTexture(images[1], index: 1)
             var uniforms = DuoUniforms(intensity: state.intensity, perspectiveDegrees: state.perspectiveDegrees,
                 blurPixels: state.blurPixels, darken: state.darken, milk: state.milk,
-                grain: state.grain, aspect: Float(width) / Float(height), time: 0)
+                grain: state.grain, aspect: Float(width) / Float(height), time: 0, motionSpeed: 0)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DuoUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
