@@ -26,7 +26,6 @@ struct EffectModel {
     static let minimumIntensityCurve: Double = 0.0
     static let maximumIntensityCurve: Double = 4.0
     static let defaultIntensityCurve: Double = 1.7
-    static let maximumBlurPixels: Float = 48.0
     // Higher values keep the effect softer just below the threshold and make
     // it build faster as the lid approaches the closed position.
     private static let intensityCurveKey = "effectIntensityCurve"
@@ -112,9 +111,10 @@ struct EffectModel {
             isClear: false,
             intensity: curvedIntensity,
             perspectiveDegrees: perspectiveDegrees,
-            // The renderer generates fixed blur layers once per captured
-            // frame and applies this intensity in the final shader mix.
-            blurPixels: maximumBlurPixels,
+            // The shader applies intensity once while computing the
+            // spatially varying radius. Keeping this as the maximum radius
+            // avoids applying the fold curve twice.
+            blurPixels: 48,
             darken: 0.14 * curvedIntensity,
             milk: 0.045 * curvedIntensity,
             grain: 0.004 * curvedIntensity

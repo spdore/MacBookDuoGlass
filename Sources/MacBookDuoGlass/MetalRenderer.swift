@@ -27,6 +27,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
     private var submittedFrames = 0
     private let frostBlur = FrostBlur()
     private var filteredBuffer: CVPixelBuffer?
+    private var filteredIntensity: Float = -1
     private var filteredTextures: [MTLTexture]?
     private var renderAngle = RenderAngle()
     private var preparedSize: CGSize = .zero
@@ -35,9 +36,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
     private var firstFramePending = true
     private var visibilityGeneration = 0
 
-    // Run the first fixed-radius blur while the overlay is still hidden. The
-    // result is reused by the first visible draw when this is still the
-    // newest captured frame, avoiding a duplicate startup blur.
+    // Run allocation and first MPS dispatch while the desktop is still clear.
     func prepare(_ pixelBuffer: CVPixelBuffer) {
         let size = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
         guard !preparing, preparedSize != size,
@@ -46,24 +45,19 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
               let command = commandQueue.makeCommandBuffer() else { return }
         let generation = prepareGeneration
         preparing = true
-        guard let images = frostBlur.encode(source: source, strength: 1,
-                                            maxSigma: EffectModel.maximumBlurPixels,
-                                            command: command) else {
+        guard frostBlur.encode(source: source, strength: 0.01, maxSigma: 48, command: command) != nil else {
             preparing = false
             return
         }
-        command.addCompletedHandler { [weak self, images] finished in
-            withExtendedLifetime((reference, pixelBuffer, images)) {}
+        filteredIntensity = -1
+        command.addCompletedHandler { [weak self] finished in
+            withExtendedLifetime((reference, pixelBuffer)) {}
             let succeeded = finished.status == .completed
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.preparing = false
                 guard self.prepareGeneration == generation else { return }
-                if succeeded {
-                    self.preparedSize = size
-                    self.filteredBuffer = pixelBuffer
-                    self.filteredTextures = images
-                }
+                if succeeded { self.preparedSize = size }
             }
         }
         command.commit()
@@ -110,7 +104,6 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
             // prevent Core Animation transactions from adding a frame.
             metalLayer.displaySyncEnabled = true
             metalLayer.presentsWithTransaction = false
-            metalLayer.maximumDrawableCount = 2
         }
         delegate = self
         clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
@@ -147,6 +140,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         latestPixelBuffer = nil
         filteredBuffer = nil
         filteredTextures = nil
+        filteredIntensity = -1
         preparedSize = .zero
         resetAngleTransition()
     }
@@ -168,21 +162,19 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
               let descriptor = currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer() else { return }
 
-        // Generate the fixed blur layers once per captured frame. Angle
-        // changes only update uniforms and are blended in the fragment
-        // shader, so moving the lid never recreates MPS filters or dispatches
-        // another full-screen Gaussian pass.
-        if filteredBuffer !== pixelBuffer {
-            guard let images = frostBlur.encode(source: texture, strength: 1,
-                maxSigma: EffectModel.maximumBlurPixels, command: commandBuffer) else { return }
+        // Reuse filtered images while both the capture frame and angle are
+        // unchanged. All writes and reads run on this same serial GPU queue.
+        if filteredBuffer !== pixelBuffer || filteredIntensity != parameters.intensity {
+            guard let images = frostBlur.encode(source: texture, strength: parameters.intensity,
+                maxSigma: parameters.blurPixels, command: commandBuffer) else { return }
             filteredTextures = images
             filteredBuffer = pixelBuffer
+            filteredIntensity = parameters.intensity
         }
         guard let images = filteredTextures,
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
-        encoder.setFragmentTexture(texture, index: 0)
-        encoder.setFragmentTexture(images[0], index: 1)
-        encoder.setFragmentTexture(images[1], index: 2)
+        encoder.setFragmentTexture(images[0], index: 0)
+        encoder.setFragmentTexture(images[1], index: 1)
 
         encoder.setRenderPipelineState(pipeline)
 
@@ -295,9 +287,8 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
 
     fragment float4 duo_fragment(
         VertexOut in [[stage_in]],
-        texture2d<float, access::sample> sharpSource [[texture(0)]],
-        texture2d<float, access::sample> weakBlur [[texture(1)]],
-        texture2d<float, access::sample> strongBlur [[texture(2)]],
+        texture2d<float, access::sample> source [[texture(0)]],
+        texture2d<float, access::sample> strongBlur [[texture(1)]],
         constant DuoUniforms &u [[buffer(0)]]) {
         constexpr sampler linearSampler(address::clamp_to_edge, filter::linear);
 
@@ -315,22 +306,18 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         sourceUV = clamp(sourceUV, float2(0.0), float2(1.0));
 
         float verticalGradient = 0.35 + 0.65 * modelY;
-        // All layers use the same reprojected coordinate. The angle-driven
-        // intensity is a cheap continuous mix; the expensive Gaussian layers
-        // were generated once for this captured frame before this pass.
-        float3 sharp = sharpSource.sample(linearSampler, sourceUV).rgb;
-        float3 medium = weakBlur.sample(linearSampler, sourceUV).rgb;
-        float3 diffuse = strongBlur.sample(linearSampler, sourceUV).rgb;
-        float3 frosted = mix(medium, diffuse, verticalGradient);
-        float blurMix = clamp(u.intensity, 0.0, 1.0);
-        float3 color = mix(sharp, frosted, blurMix);
+        // Sample both filtered images at the SAME perspective coordinate:
+        // no displaced copies and no sharp image leaking through the frost.
+        float4 color = mix(source.sample(linearSampler, sourceUV),
+                           strongBlur.sample(linearSampler, sourceUV), modelY);
 
         float shading = u.darken * verticalGradient;
-        color *= 1.0 - shading;
-        color = mix(color, float3(0.96, 0.97, 1.0), u.milk * verticalGradient);
+        color.rgb *= 1.0 - shading;
+        color.rgb = mix(color.rgb, float3(0.96, 0.97, 1.0), u.milk * verticalGradient);
         float noise = (hash21(outputUV * 1024.0) - 0.5) * u.grain;
-        color += noise;
-        return float4(color, 1.0);
+        color.rgb += noise;
+        color.a = 1.0;
+        return color;
     }
     """
 }

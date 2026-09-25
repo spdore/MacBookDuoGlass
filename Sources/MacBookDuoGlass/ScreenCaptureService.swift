@@ -101,9 +101,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.width = display.width
         configuration.height = display.height
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        // Keep the capture pipeline shallow so old screen frames cannot sit
-        // in front of the newest lid-angle sample.
-        configuration.queueDepth = 2
+        configuration.queueDepth = 3
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.showsCursor = false
         configuration.capturesAudio = false

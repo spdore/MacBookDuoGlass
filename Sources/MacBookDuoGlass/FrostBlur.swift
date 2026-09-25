@@ -1,9 +1,8 @@
 import Metal
 import MetalPerformanceShaders
 
-// The final perspective pass receives these spatially continuous Gaussian
-// layers alongside the captured source. Never approximate a large blur with
-// distant samples of sharp text.
+// Both inputs to the final perspective pass are spatially continuous Gaussian
+// images. Never approximate a large blur with distant samples of sharp text.
 final class FrostBlur {
     private var textures: [MTLTexture] = []
     private var filters: [MPSImageGaussianBlur] = []
