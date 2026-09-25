@@ -241,7 +241,8 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
             }
             requestOrStartCapture()
             updateOverlayIfNeeded()
-        } else {
+        } else if captureDemandActive || capture.isRunning || capture.isStarting ||
+                    isCaptureReady || lastFrame != nil || permissionPollTimer != nil {
             stopCaptureForInactiveState()
         }
     }

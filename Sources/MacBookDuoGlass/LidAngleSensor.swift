@@ -15,6 +15,15 @@ final class LidAngleSensor {
     private var consecutiveReadFailures = 0
     private var nextDiscoveryAttempt = -Double.greatestFiniteMagnitude
     private var hasPublishedInvalidSample = false
+    // The HID timer is faster than the display link. Keep one pending sample
+    // and deliver only the newest value to AppKit so stale angles cannot pile
+    // up on the main queue.
+    private let deliveryLock = NSLock()
+    private var pendingSample: AngleSample?
+    private var deliveryScheduled = false
+    private var deliveryGeneration: UInt = 0
+    private var lastQueuedRawValue: UInt16?
+    private var lastQueuedValidity: Bool?
 
     private let invalidReadTimeout: CFTimeInterval = 0.25
     private let discoveryRetryInterval: CFTimeInterval = 0.25
@@ -29,6 +38,13 @@ final class LidAngleSensor {
             self.consecutiveReadFailures = 0
             self.hasPublishedInvalidSample = false
             self.nextDiscoveryAttempt = -Double.greatestFiniteMagnitude
+            self.deliveryLock.lock()
+            self.deliveryGeneration &+= 1
+            self.pendingSample = nil
+            self.deliveryScheduled = false
+            self.lastQueuedRawValue = nil
+            self.lastQueuedValidity = nil
+            self.deliveryLock.unlock()
             self.discoverDeviceIfNeeded()
             self.installTimer()
             self.readAndPublish()
@@ -42,13 +58,20 @@ final class LidAngleSensor {
             self.timer?.cancel()
             self.timer = nil
             self.closeSensorResources()
+            self.deliveryLock.lock()
+            self.deliveryGeneration &+= 1
+            self.pendingSample = nil
+            self.deliveryScheduled = false
+            self.lastQueuedRawValue = nil
+            self.lastQueuedValidity = nil
+            self.deliveryLock.unlock()
         }
     }
 
     private func installTimer() {
         timer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(5), leeway: .microseconds(500))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(5), leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in
             self?.readAndPublish()
         }
@@ -211,9 +234,36 @@ final class LidAngleSensor {
     }
 
     private func publish(_ sample: AngleSample) {
+        guard lastQueuedRawValue != sample.rawValue || lastQueuedValidity != sample.isValid else {
+            return
+        }
+        lastQueuedRawValue = sample.rawValue
+        lastQueuedValidity = sample.isValid
+
         let handler = handler
+        deliveryLock.lock()
+        pendingSample = sample
+        guard !deliveryScheduled else {
+            deliveryLock.unlock()
+            return
+        }
+        deliveryScheduled = true
+        let generation = deliveryGeneration
+        deliveryLock.unlock()
+
         DispatchQueue.main.async {
-            handler?(sample)
+            self.deliveryLock.lock()
+            guard self.deliveryScheduled,
+                  self.deliveryGeneration == generation else {
+                self.deliveryLock.unlock()
+                return
+            }
+            let newestSample = self.pendingSample
+            self.pendingSample = nil
+            self.deliveryScheduled = false
+            self.deliveryLock.unlock()
+            guard let newestSample else { return }
+            handler?(newestSample)
         }
     }
 }
