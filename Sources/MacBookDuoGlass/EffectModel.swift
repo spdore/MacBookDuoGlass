@@ -100,12 +100,17 @@ struct EffectModel {
         // the fold subtle, then increases the effect more quickly near 0°.
         let progress = min(max((clearThreshold - clampedAngle) / clearThreshold, 0), 1)
         let curvedIntensity = Float(intensity(forProgress: progress))
+        // Projection follows the physical fold linearly and reaches a maximum
+        // equal to the selected activation angle. The curve is reserved for
+        // the frosted material response, so changing its slider never changes
+        // the projected composition.
+        let perspectiveDegrees = Float(clearThreshold * progress)
         return EffectState(
             angle: clampedAngle,
             isValid: true,
             isClear: false,
             intensity: curvedIntensity,
-            perspectiveDegrees: 55 * curvedIntensity,
+            perspectiveDegrees: perspectiveDegrees,
             // The shader applies intensity once while computing the
             // spatially varying radius. Keeping this as the maximum radius
             // avoids applying the fold curve twice.

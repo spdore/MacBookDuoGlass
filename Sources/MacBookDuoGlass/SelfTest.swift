@@ -56,6 +56,24 @@ enum SelfTest {
             return 1
         }
         print(String(format: "Exponential strength curve: near threshold %.1f%%, midpoint %.1f%% (ok)", nearThreshold * 100, midpoint * 100))
+        let midpointAngle = EffectModel.clearThreshold * 0.5
+        let perspectiveAtMidpoint = EffectModel.state(angle: midpointAngle).perspectiveDegrees
+        let savedCurveForProjectionTest = EffectModel.intensityCurve
+        EffectModel.intensityCurve = EffectModel.minimumIntensityCurve
+        let linearCurvePerspective = EffectModel.state(angle: midpointAngle).perspectiveDegrees
+        EffectModel.intensityCurve = EffectModel.maximumIntensityCurve
+        let steepCurvePerspective = EffectModel.state(angle: midpointAngle).perspectiveDegrees
+        EffectModel.intensityCurve = savedCurveForProjectionTest
+        let expectedMidpointPerspective = Float(midpointAngle)
+        guard abs(perspectiveAtMidpoint - expectedMidpointPerspective) < 0.0001,
+              abs(linearCurvePerspective - expectedMidpointPerspective) < 0.0001,
+              abs(steepCurvePerspective - expectedMidpointPerspective) < 0.0001,
+              abs(linearCurvePerspective - steepCurvePerspective) < 0.0001,
+              abs(EffectModel.state(angle: 0).perspectiveDegrees - Float(EffectModel.clearThreshold)) < 0.0001 else {
+            print("Perspective cap and curve independence: failed")
+            return 1
+        }
+        print(String(format: "Perspective cap: %.0f° and independent of curve (ok)", EffectModel.clearThreshold))
         guard EffectModel.state(angle: 100).isClear,
               EffectModel.state(angle: 100.01).isClear,
               !EffectModel.state(angle: .nan).isValid else { return 1 }
