@@ -2,12 +2,12 @@ import Foundation
 
 // Interpolate the displayed angle, not the sensor's reported precision.
 // A repeated target does not restart the transition; a stationary lid settles
-// exactly after 40 ms instead of continuing to drift.
+// exactly after one short display transition instead of continuing to drift.
 struct RenderAngle {
     private var start: Double = 0
     private var target: Double?
     private var startedAt: Double = 0
-    let duration: Double = 0.040
+    let duration: Double = 0.020
 
     mutating func reset() { target = nil }
 

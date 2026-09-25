@@ -15,6 +15,13 @@ final class LidAngleSensor {
     private var consecutiveReadFailures = 0
     private var nextDiscoveryAttempt = -Double.greatestFiniteMagnitude
     private var hasPublishedInvalidSample = false
+    // The HID timer is intentionally faster than the display link. Keep only
+    // the newest sample when the main run loop is busy instead of delivering
+    // a queue of stale angles that makes the overlay feel behind the lid.
+    private let deliveryLock = NSLock()
+    private var pendingSample: AngleSample?
+    private var deliveryScheduled = false
+    private var deliveryGeneration: UInt = 0
 
     private let invalidReadTimeout: CFTimeInterval = 0.25
     private let discoveryRetryInterval: CFTimeInterval = 0.25
@@ -42,6 +49,11 @@ final class LidAngleSensor {
             self.timer?.cancel()
             self.timer = nil
             self.closeSensorResources()
+            self.deliveryLock.lock()
+            self.deliveryGeneration &+= 1
+            self.pendingSample = nil
+            self.deliveryScheduled = false
+            self.deliveryLock.unlock()
         }
     }
 
@@ -212,8 +224,29 @@ final class LidAngleSensor {
 
     private func publish(_ sample: AngleSample) {
         let handler = handler
+        deliveryLock.lock()
+        pendingSample = sample
+        guard !deliveryScheduled else {
+            deliveryLock.unlock()
+            return
+        }
+        deliveryScheduled = true
+        let generation = deliveryGeneration
+        deliveryLock.unlock()
+
         DispatchQueue.main.async {
-            handler?(sample)
+            self.deliveryLock.lock()
+            guard self.deliveryScheduled,
+                  self.deliveryGeneration == generation else {
+                self.deliveryLock.unlock()
+                return
+            }
+            let newestSample = self.pendingSample
+            self.pendingSample = nil
+            self.deliveryScheduled = false
+            self.deliveryLock.unlock()
+            guard let newestSample else { return }
+            handler?(newestSample)
         }
     }
 }

@@ -81,7 +81,7 @@ enum SelfTest {
         var transition = RenderAngle()
         transition.update(90, at: 0)
         transition.update(89, at: 1)
-        guard let halfway = transition.value(at: 1.02),
+        guard let halfway = transition.value(at: 1 + transition.duration * 0.5),
               abs(halfway - 89.5) < 0.00001 else { return 1 }
         transition.update(89, at: 1.025) // duplicate samples must not prolong it
         guard transition.value(at: 1.05) == 89,
@@ -98,8 +98,8 @@ enum SelfTest {
         transition.update(EffectModel.clearThreshold, at: 8)
         transition.update(99, at: 8)
         guard transition.value(at: 8) == 100,
-              abs((transition.value(at: 8.02) ?? 0) - 99.5) < 0.00001,
-              transition.value(at: 8.05) == 99 else { return 1 }
+              abs((transition.value(at: 8 + transition.duration * 0.5) ?? 0) - 99.5) < 0.00001,
+              transition.value(at: 8 + transition.duration + 0.01) == 99 else { return 1 }
         print("Continuous render angle: fractional, bounded settling, reversal and reset (ok)")
 
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -178,16 +178,17 @@ enum SelfTest {
         func render(_ angle: Double, isolateBlur: Bool = false) -> [UInt8]? {
             let state = EffectModel.state(angle: angle)
             guard let command = queue.makeCommandBuffer() else { return nil }
-            guard let images = blur.encode(source: source, strength: state.intensity,
-                maxSigma: state.blurPixels, command: command) else { return nil }
+            guard let images = blur.encode(source: source, strength: 1,
+                maxSigma: EffectModel.maximumBlurPixels, command: command) else { return nil }
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = output
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return nil }
             encoder.setRenderPipelineState(pipeline)
-            encoder.setFragmentTexture(images[0], index: 0)
-            encoder.setFragmentTexture(images[1], index: 1)
+            encoder.setFragmentTexture(source, index: 0)
+            encoder.setFragmentTexture(images[0], index: 1)
+            encoder.setFragmentTexture(images[1], index: 2)
             var uniforms = DuoUniforms(intensity: state.intensity, perspectiveDegrees: isolateBlur ? 0 : state.perspectiveDegrees,
                 blurPixels: state.blurPixels, darken: isolateBlur ? 0 : state.darken, milk: isolateBlur ? 0 : state.milk,
                 grain: isolateBlur ? 0 : state.grain, aspect: 1, time: 0)
@@ -206,6 +207,26 @@ enum SelfTest {
         }
         guard let mild = render(100), let strong = render(0),
               mild != strong else { print("GPU strength response: failed"); return false }
+        // Isolate the frosting path from projection and lighting. The output
+        // distance from the clear frame must increase as the lid closes; this
+        // guards the continuous shader mix that replaces per-angle MPS work.
+        let blurAngles = [100.0, 90, 60, 50, 0]
+        let blurFrames = blurAngles.compactMap { render($0, isolateBlur: true) }
+        guard blurFrames.count == blurAngles.count else {
+            print("GPU angle blur response: failed")
+            return false
+        }
+        func byteDistance(_ lhs: [UInt8], _ rhs: [UInt8]) -> UInt64 {
+            zip(lhs, rhs).reduce(into: UInt64(0)) { total, pair in
+                total += UInt64(abs(Int(pair.0) - Int(pair.1)))
+            }
+        }
+        let blurDistances = blurFrames.dropFirst().map { byteDistance(blurFrames[0], $0) }
+        guard zip(blurDistances, blurDistances.dropFirst()).allSatisfy({ $0 < $1 }) else {
+            print("GPU angle blur response: failed")
+            return false
+        }
+        print("GPU angle blur response: monotonic 100°→0° (ok)")
         // Changing strength and returning to the same angle must reproduce every pixel.
         for _ in 0..<12 {
             guard render(100) == mild else { print("GPU stationary output: failed"); return false }
@@ -322,16 +343,17 @@ enum SelfTest {
         var lastCommand: MTLCommandBuffer?
         for _ in 0..<frameCount {
             guard let command = queue.makeCommandBuffer() else { return }
-            guard let images = blur.encode(source: source, strength: state.intensity,
-                maxSigma: state.blurPixels, command: command) else { return }
+            guard let images = blur.encode(source: source, strength: 1,
+                maxSigma: EffectModel.maximumBlurPixels, command: command) else { return }
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = output
             pass.colorAttachments[0].loadAction = .dontCare
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
             encoder.setRenderPipelineState(pipeline)
-            encoder.setFragmentTexture(images[0], index: 0)
-            encoder.setFragmentTexture(images[1], index: 1)
+            encoder.setFragmentTexture(source, index: 0)
+            encoder.setFragmentTexture(images[0], index: 1)
+            encoder.setFragmentTexture(images[1], index: 2)
             var uniforms = DuoUniforms(intensity: state.intensity, perspectiveDegrees: state.perspectiveDegrees,
                 blurPixels: state.blurPixels, darken: state.darken, milk: state.milk,
                 grain: state.grain, aspect: Float(width) / Float(height), time: 0)
