@@ -50,7 +50,7 @@ cd MacBookDuoGlass
 ./scripts/build_app.sh
 ```
 
-The script builds a Release app at `dist/MacBookDuoGlass.app`, includes the app icon, and applies an ad-hoc signature using the existing bundle identifier `com.spdor.MacBookDuoGlass`. The build uses the architecture of the Mac performing the build.
+The script builds a Release app at `dist/MacBookDuoGlass.app`, includes the app icon, removes local debug paths from the executable, and applies an ad-hoc signature using the existing bundle identifier `com.spdor.MacBookDuoGlass`. The build uses the architecture of the Mac performing the build.
 
 To run the project self-test:
 

@@ -17,6 +17,7 @@ cp "$project_dir/AppInfo.plist" "$app_dir/Contents/Info.plist"
 cp "$project_dir/Resources/AppIcon.icns" "$app_dir/Contents/Resources/AppIcon.icns"
 
 chmod +x "$app_dir/Contents/MacOS/MacBookDuoGlass"
+strip -S "$app_dir/Contents/MacOS/MacBookDuoGlass"
 # The Swift linker gives the executable an ad-hoc signature whose identifier is
 # the executable name. Sign the finished bundle explicitly so its code identity
 # matches CFBundleIdentifier and the Info.plist is sealed into the signature.
