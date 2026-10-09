@@ -1,93 +1,67 @@
 # MacBook Duo Glass
 
-A macOS menu bar utility that applies an angle-driven perspective and frosted-glass effect to the built-in MacBook display. The app reads the lid angle, captures the display only when the effect is active, and renders everything locally with Metal.
+A macOS menu bar app that uses the MacBook lid angle to apply a perspective and frosted-glass effect to the built-in display.
 
 ## Features
 
-- Automatically enables the effect from the lid angle. The activation threshold is configurable from `75°` to `120°` and defaults to `100°`.
-- Keeps perspective projection continuous as the lid moves. A separate exponential curve controls the frosted material strength, so smaller angles produce a stronger effect without changing the projection limit.
-- Provides spatial blur, directional reflection, distance-based transmission, chromatic dispersion, hinge-area highlights, a fade to black, a soft edge mask, and motion scattering.
-- **Mirror mode** keeps only the perspective projection and disables blur, frost, reflection, and dispersion.
-- **Adaptive angle** learns a stationary viewing angle after 3 seconds and sets the activation threshold to the learned angle minus `3°`. The built-in minimum is `75°`.
-- Includes native menu bar switches, threshold and curve sliders, diagnostics, and a permission recheck action.
-- Targets 60 Hz for sensor updates and rendering. Screen capture starts only below the activation threshold and stops when the display returns above it.
-- Recovers from sleep, wake, and display changes. The app excludes its own overlay from capture to prevent recursive rendering.
+- Starts screen capture only while the effect is enabled and the lid is below the selected angle. Frames are processed in memory and are not saved or uploaded.
+- Sets an activation angle from 75° to 120° (100° by default). Perspective changes with the lid angle; the effect-curve control changes the frosted-effect strength without changing perspective.
+- Includes a projection-only Mirror Mode and an Adaptive Angle option. Adaptive Angle uses a steady position held for 3 seconds, then sets the threshold to that angle minus 3°. Its minimum threshold is 75°.
+- Provides menu bar controls, a diagnostics view, and a screen-recording permission recheck.
+- Targets 60 Hz for angle sampling, capture, and rendering, and restarts capture after sleep, wake, or display changes.
 
 ## Compatibility
 
-- macOS 14 Sonoma or later.
-- Apple Silicon MacBook Air and MacBook Pro models with a built-in display and a compatible lid-angle HID sensor.
-- The current implementation is intended for the built-in display. External displays, desktop Macs, and Intel Macs without the supported sensor are not guaranteed to work.
-- macOS capture restrictions still apply to the lock screen, protected video, and some system full-screen surfaces.
+- macOS 14 or later.
+- Tested on one MacBook Air with Apple M4, running macOS 26.5.2. The built-in display must expose a compatible lid-angle HID sensor. Other MacBook models have not been verified.
+- The downloadable app is built for Apple Silicon (`arm64`). Intel compatibility is unverified.
+- macOS may restrict capture of protected video, the login screen, and some full-screen system content.
 
-## Installation
+## Install the prebuilt app
 
-This repository currently provides a source build. It does not include a prebuilt bundle tied to a local signing identity or local file paths.
+1. Open the [v0.2.0 release](https://github.com/spdore/MacBookDuoGlass/releases/tag/v0.2.0) and download `MacBookDuoGlass-0.2.0-macos-arm64.zip`.
+2. Double-click the ZIP file in Finder to extract `MacBookDuoGlass.app`.
+3. If the app is already running, choose **退出 MacBook Duo Glass** from its menu bar menu. Move the extracted app into **Applications**. Use one copy of the app so macOS permission settings stay associated with the same app identity.
+4. Open the app from **Applications**. This release is ad-hoc signed and is not notarized. If macOS blocks the first launch, Control-click the app in Finder, choose **Open**, and confirm the prompt.
+5. Open **System Settings → Privacy & Security → Screen Recording** (called **Screen & System Audio Recording** on some macOS versions). Allow **MacBook Duo Glass**, then quit and reopen the app.
+6. Click **Duo** in the menu bar and choose **显示诊断** (Show Diagnostics). The screen-capture status should become ready when the lid is below the activation angle.
 
-### 1. Prepare the environment
+## Use the app
 
-1. Confirm that macOS 14 or later is installed.
-2. Install Apple's Command Line Tools:
+The current menu labels are in Chinese. The main controls are:
 
-   ```sh
-   xcode-select --install
-   ```
+- **启用效果** — turn the effect on or off.
+- **效果启动角度** — choose a threshold from 75° to 120°.
+- **指数曲线参数** — adjust how quickly the frosted effect grows as the lid closes. This does not change the perspective.
+- **哈哈镜模式** — show perspective without blur or frosted-material effects.
+- **自适应角度** — learn a stationary angle after 3 seconds and set the threshold to angle minus 3° (minimum 75°). Turning it off restores the previous manual threshold.
+- **重新检查屏幕录制权限** — recheck capture permission if the app was authorized in System Settings while it was running.
 
-3. Verify that Swift is available:
+Capture stops when the effect is disabled or the lid returns to or above the selected angle. The app excludes its own overlay from the captured display to avoid recursive images.
 
-   ```sh
-   swift --version
-   ```
+## Build from source
 
-### 2. Clone and build
-
-Run the following commands in Terminal:
+You need macOS 14 or later and Apple's Command Line Tools. Install the tools if needed, then clone and build:
 
 ```sh
+xcode-select --install
 git clone https://github.com/spdore/MacBookDuoGlass.git
 cd MacBookDuoGlass
 ./scripts/build_app.sh
 ```
 
-The script builds a Release configuration and creates `dist/MacBookDuoGlass.app`. It also applies an ad-hoc macOS bundle signature. The `dist/` directory is a local build output and is not committed to the repository.
+The script builds a Release app at `dist/MacBookDuoGlass.app`, includes the app icon, and applies an ad-hoc signature using the existing bundle identifier `com.spdor.MacBookDuoGlass`. The build uses the architecture of the Mac performing the build.
 
-### 3. Install the application
-
-1. Open the project's `dist` folder in Finder.
-2. Drag `MacBookDuoGlass.app` into the **Applications** folder.
-3. If an older copy is running, quit it from the menu bar first. Open only the copy in **Applications** so that macOS does not associate permissions with a different duplicate.
-4. On the first launch, macOS may say that the developer cannot be verified. In Finder, Control-click the app, choose **Open**, and confirm. Alternatively, choose **Open Anyway** at the bottom of **System Settings → Privacy & Security**.
-
-### 4. Grant Screen Recording permission
-
-Screen Recording permission is required to read the current display and generate the live effect. Frames are processed in memory and are not saved, uploaded, or sent anywhere. The app does not request camera, microphone, or Accessibility permission.
-
-1. Open **System Settings → Privacy & Security → Screen Recording**.
-2. Enable **MacBook Duo Glass**.
-3. If macOS asks to reopen the app, choose **Quit & Reopen**. Otherwise, quit the app manually and launch it again.
-4. Open the menu bar item and choose **Show Diagnostics**. Screen capture should be shown as ready.
-5. Capture starts only when the lid angle is below the selected threshold and the effect switch is enabled. It stops again when the angle returns above the threshold.
-
-If the permission list contains an older duplicate, quit every copy, disable the old entry, launch the copy from **Applications**, and grant permission to that copy. macOS binds Screen Recording permission to the signed app identity, so avoid alternating between copies in different folders.
-
-### 5. Use the effect
-
-1. Click **Duo** in the menu bar.
-2. Use **Activation Angle** to choose a threshold from `75°` to `120°`.
-3. Use **Effect Curve** to control how quickly the frosted effect grows. This slider does not change the perspective limit.
-4. Enable **Mirror Mode** when you want to see projection changes without the material effect.
-5. Enable **Adaptive Angle** and hold the display at a preferred angle for at least 3 seconds to learn it automatically.
-
-### 6. Optional self-test
-
-From the project directory, run:
+To run the project self-test:
 
 ```sh
 swift run -c debug MacBookDuoGlass --self-test
 ```
 
-The self-test checks angle mapping, threshold limits, Metal rendering, Screen Recording permission, and the lid-angle sensor.
+## Permission troubleshooting
+
+If capture is not ready, quit every running copy, open the copy in **Applications**, check **System Settings → Privacy & Security → Screen Recording**, and reopen the app. If needed, use **重新检查屏幕录制权限** from the Duo menu and review **显示诊断**. macOS can show duplicate entries when copies from different folders have been launched.
 
 ## Uninstall
 
-Quit the menu bar app, then move `MacBookDuoGlass.app` from **Applications** to the Trash. If you no longer need capture access, disable the app under **System Settings → Privacy & Security → Screen Recording**.
+Quit the app and move **MacBook Duo Glass.app** from **Applications** to the Trash. You can also disable its screen-recording permission in System Settings.
