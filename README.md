@@ -21,21 +21,21 @@ A macOS menu bar app that uses the MacBook lid angle to apply a perspective and 
 
 1. Open the [v0.2.0 release](https://github.com/spdore/MacBookDuoGlass/releases/tag/v0.2.0) and download `MacBookDuoGlass-0.2.0-macos-arm64.zip`.
 2. Double-click the ZIP file in Finder to extract `MacBookDuoGlass.app`.
-3. If the app is already running, choose **退出 MacBook Duo Glass** from its menu bar menu. Move the extracted app into **Applications**. Use one copy of the app so macOS permission settings stay associated with the same app identity.
+3. If the app is already running, quit it from the menu bar. Move the extracted app into **Applications**. Use one copy of the app so macOS permission settings stay associated with the same app identity.
 4. Open the app from **Applications**. This release is ad-hoc signed and is not notarized. If macOS blocks the first launch, Control-click the app in Finder, choose **Open**, and confirm the prompt.
 5. Open **System Settings → Privacy & Security → Screen Recording** (called **Screen & System Audio Recording** on some macOS versions). Allow **MacBook Duo Glass**, then quit and reopen the app.
-6. Click **Duo** in the menu bar and choose **显示诊断** (Show Diagnostics). The screen-capture status should become ready when the lid is below the activation angle.
+6. Click **Duo** in the menu bar and open the diagnostics view. The screen-capture status should become ready when the lid is below the activation angle.
 
 ## Use the app
 
-The current menu labels are in Chinese. The main controls are:
+The app's menu controls are currently displayed in Chinese. They provide these functions:
 
-- **启用效果** — turn the effect on or off.
-- **效果启动角度** — choose a threshold from 75° to 120°.
-- **指数曲线参数** — adjust how quickly the frosted effect grows as the lid closes. This does not change the perspective.
-- **哈哈镜模式** — show perspective without blur or frosted-material effects.
-- **自适应角度** — learn a stationary angle after 3 seconds and set the threshold to angle minus 3° (minimum 75°). Turning it off restores the previous manual threshold.
-- **重新检查屏幕录制权限** — recheck capture permission if the app was authorized in System Settings while it was running.
+- The main switch turns the effect on or off.
+- The activation-angle slider chooses a threshold from 75° to 120°.
+- The effect-curve slider adjusts how quickly the frosted effect grows as the lid closes. It does not change the perspective.
+- Mirror Mode shows the perspective without blur or frosted-material effects.
+- Adaptive Angle learns a stationary angle after 3 seconds and sets the threshold to that angle minus 3° (minimum 75°). Turning it off restores the previous manual threshold.
+- A permission-recheck control is available if screen-recording access was granted while the app was running.
 
 Capture stops when the effect is disabled or the lid returns to or above the selected angle. The app excludes its own overlay from the captured display to avoid recursive images.
 
@@ -60,7 +60,7 @@ swift run -c debug MacBookDuoGlass --self-test
 
 ## Permission troubleshooting
 
-If capture is not ready, quit every running copy, open the copy in **Applications**, check **System Settings → Privacy & Security → Screen Recording**, and reopen the app. If needed, use **重新检查屏幕录制权限** from the Duo menu and review **显示诊断**. macOS can show duplicate entries when copies from different folders have been launched.
+If capture is not ready, quit every running copy, open the copy in **Applications**, check **System Settings → Privacy & Security → Screen Recording**, and reopen the app. If needed, use the permission-recheck control in the Duo menu and review the diagnostics view. macOS can show duplicate entries when copies from different folders have been launched.
 
 ## Uninstall
 
