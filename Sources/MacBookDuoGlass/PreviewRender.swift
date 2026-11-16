@@ -7,41 +7,68 @@ import Metal
 /// synthetic desktop. It needs neither screen-recording permission nor a
 /// physical lid movement, so before/after comparisons can be rendered anywhere.
 ///
-///     MacBookDuoGlass --render-preview <output-dir> [--style fold|classic] [width height]
+///     MacBookDuoGlass --render-preview <output-dir> [--style fold|classic] [--mirror] [width height]
 ///
+/// `--mirror` renders Mirror Mode (projection only, no material effects).
 /// Only the generated fixture is drawn; no user screen content is read or saved.
+/// The exit code is 0 only when every file was written; any failure is printed
+/// to standard error and the process exits non-zero.
 enum PreviewRender {
     static let angles: [Double] = [100, 90, 75, 60, 45, 30, 15, 0]
 
+    private struct Failure: Error, CustomStringConvertible {
+        let description: String
+        init(_ description: String) { self.description = description }
+    }
+
     static func run(arguments: [String]) -> Int32 {
-        var arguments = arguments
-        guard let outputPath = arguments.first else {
-            print("usage: --render-preview <output-dir> [--style fold|classic] [width height]")
+        guard arguments.first != nil else {
+            print("usage: --render-preview <output-dir> [--style fold|classic] [--mirror] [width height]")
             return 2
         }
-        arguments.removeFirst()
+        do {
+            return try generate(arguments: arguments)
+        } catch {
+            FileHandle.standardError.write(Data("Preview failed: \(error)\n".utf8))
+            return 1
+        }
+    }
+
+    private static func generate(arguments: [String]) throws -> Int32 {
+        var arguments = arguments
+        let outputPath = arguments.removeFirst()
         var fold = true
         if let flag = arguments.firstIndex(of: "--style"), flag + 1 < arguments.count {
             fold = arguments[flag + 1] != "classic"
             arguments.removeSubrange(flag...(flag + 1))
         }
+        var mirror = false
+        if let flag = arguments.firstIndex(of: "--mirror") {
+            mirror = true
+            arguments.remove(at: flag)
+        }
         let width = arguments.count >= 2 ? Int(arguments[0]) ?? 1440 : 1440
         let height = arguments.count >= 2 ? Int(arguments[1]) ?? 932 : 932
         let directory = URL(fileURLWithPath: outputPath, isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw Failure("cannot create \(directory.path): \(error.localizedDescription)")
+        }
 
         guard let device = MTLCreateSystemDefaultDevice(),
               let library = try? device.makeLibrary(source: DuoMetalView.shaderSource, options: nil),
               let queue = device.makeCommandQueue() else {
-            print("Preview: no Metal device")
-            return 1
+            throw Failure("no Metal device")
         }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         descriptor.storageMode = .shared
         descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
         guard let source = device.makeTexture(descriptor: descriptor),
-              let output = device.makeTexture(descriptor: descriptor) else { return 1 }
+              let output = device.makeTexture(descriptor: descriptor) else {
+            throw Failure("cannot allocate \(width)x\(height) textures")
+        }
 
         var fixture = [UInt8](repeating: 0, count: width * height * 4)
         drawDesktop(into: &fixture, width: width, height: height)
@@ -54,11 +81,13 @@ enum PreviewRender {
         pipelineDescriptor.vertexFunction = library.makeFunction(name: "duo_vertex")
         pipelineDescriptor.fragmentFunction = library.makeFunction(name: fold ? "duo_fragment_fold" : "duo_fragment")
         pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-        guard let pipeline = try? device.makeRenderPipelineState(descriptor: pipelineDescriptor) else { return 1 }
+        guard let pipeline = try? device.makeRenderPipelineState(descriptor: pipelineDescriptor) else {
+            throw Failure("cannot build the render pipeline")
+        }
         let blur = FrostBlur()
 
         func render(angle: Double, motionSpeed: Float) -> CGImage? {
-            let state = EffectModel.state(angle: angle)
+            let state = EffectModel.state(angle: angle, projectionOnly: mirror)
             guard let command = queue.makeCommandBuffer(),
                   let images = blur.encode(source: source, strength: state.intensity,
                                            maxSigma: state.blurPixels, command: command) else { return nil }
@@ -89,21 +118,23 @@ enum PreviewRender {
         var tiles: [(String, CGImage)] = []
         for angle in angles {
             guard let image = render(angle: angle, motionSpeed: 0) else {
-                print("Preview: render failed at \(angle)°")
-                return 1
+                throw Failure("render failed at \(Int(angle))°")
             }
-            write(image, to: directory.appendingPathComponent("angle-\(Int(angle)).png"))
+            try write(image, to: directory.appendingPathComponent("angle-\(Int(angle)).png"))
             tiles.append(("\(Int(angle))°", image))
         }
         // One moving-lid frame, so the motion-scattering term can be compared too.
-        if let moving = render(angle: 60, motionSpeed: 420) {
-            write(moving, to: directory.appendingPathComponent("angle-60-moving.png"))
-            tiles.append(("60° moving", moving))
+        guard let moving = render(angle: 60, motionSpeed: 420) else {
+            throw Failure("render failed at 60° moving")
         }
-        if let sheet = contactSheet(tiles, tileWidth: 720, tileHeight: 720 * height / width) {
-            write(sheet, to: directory.appendingPathComponent("contact-sheet.png"))
+        try write(moving, to: directory.appendingPathComponent("angle-60-moving.png"))
+        tiles.append(("60° moving", moving))
+        guard let sheet = contactSheet(tiles, tileWidth: 720, tileHeight: 720 * height / width) else {
+            throw Failure("cannot compose the contact sheet")
         }
-        print("Preview written to \(directory.path) (\(tiles.count) frames, \(width)x\(height), \(fold ? "fold plane" : "classic glass"))")
+        try write(sheet, to: directory.appendingPathComponent("contact-sheet.png"))
+        let styleName = fold ? "fold plane" : "classic glass"
+        print("Preview written to \(directory.path) (\(tiles.count) frames, \(width)x\(height), \(styleName)\(mirror ? ", mirror mode" : ""))")
         return 0
     }
 
@@ -119,9 +150,15 @@ enum PreviewRender {
         bytes.withUnsafeMutableBytes { makeContext($0.baseAddress!, width: width, height: height)?.makeImage() }
     }
 
-    private static func write(_ image: CGImage, to url: URL) {
-        guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
-        try? png.write(to: url)
+    private static func write(_ image: CGImage, to url: URL) throws {
+        guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+            throw Failure("cannot encode \(url.lastPathComponent) as PNG")
+        }
+        do {
+            try png.write(to: url)
+        } catch {
+            throw Failure("cannot write \(url.path): \(error.localizedDescription)")
+        }
     }
 
     /// A stand-in desktop: gradient wallpaper, menu bar, two windows with
