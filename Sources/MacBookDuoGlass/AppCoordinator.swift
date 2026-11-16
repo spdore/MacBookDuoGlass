@@ -83,6 +83,18 @@ final class AppCoordinator: NSObject, NSApplicationDelegate {
         menu.addItem(hahaMirrorItem)
         self.hahaMirrorControl = hahaMirrorControl
 
+        let foldPlaneControl = ModeToggleMenuView(
+            title: "折叠平面透视",
+            isOn: EffectModel.perspectiveStyle == .foldPlane,
+            toolTip: "整块画面绕铰链向后倾斜：铰链边不动，远端收窄成梯形。关闭后使用原来的玻璃重投影透视")
+        foldPlaneControl.onChange = { isOn in
+            // The renderer reads the style every frame; nothing else to refresh.
+            EffectModel.perspectiveStyle = isOn ? .foldPlane : .classicGlass
+        }
+        let foldPlaneItem = NSMenuItem()
+        foldPlaneItem.view = foldPlaneControl
+        menu.addItem(foldPlaneItem)
+
         let adaptiveAngleControl = ModeToggleMenuView(
             title: "自适应角度",
             isOn: adaptiveAngleEnabled,

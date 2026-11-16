@@ -6,6 +6,7 @@ A macOS menu bar app that uses the MacBook lid angle to apply a perspective and 
 
 - Starts screen capture only while the effect is enabled and the lid is below the selected angle. Frames are processed in memory and are not saved or uploaded.
 - Sets an activation angle from 75° to 120° (100° by default). Perspective changes with the lid angle; the effect-curve control changes the frosted-effect strength without changing perspective.
+- Two perspective styles. **Fold plane** (default) tilts the whole picture back about the hinge: the hinge edge stays put, the far edge recedes into a trapezoid, nothing is cropped, and the plane fades out as the lid closes. **Classic glass** is the original model, a glass pane swinging in front of fixed content. Switch between them with the **折叠平面透视** toggle in the menu.
 - Includes a projection-only Mirror Mode and an Adaptive Angle option. Adaptive Angle uses a steady position held for 3 seconds, then sets the threshold to that angle minus 3°. Its minimum threshold is 75°.
 - Provides menu bar controls, a diagnostics view, and a screen-recording permission recheck.
 - Targets 60 Hz for angle sampling, capture, and rendering, and restarts capture after sleep, wake, or display changes.
@@ -33,6 +34,7 @@ The app's menu controls are currently displayed in Chinese. They provide these f
 - The main switch turns the effect on or off.
 - The activation-angle slider chooses a threshold from 75° to 120°.
 - The effect-curve slider adjusts how quickly the frosted effect grows as the lid closes. It does not change the perspective.
+- The fold-plane toggle chooses the perspective style (on: fold plane, off: classic glass). Both styles use the same frosted material.
 - Mirror Mode shows the perspective without blur or frosted-material effects.
 - Adaptive Angle learns a stationary angle after 3 seconds and sets the threshold to that angle minus 3° (minimum 75°). Turning it off restores the previous manual threshold.
 - A permission-recheck control is available if screen-recording access was granted while the app was running.
@@ -58,9 +60,22 @@ To run the project self-test:
 swift run -c debug MacBookDuoGlass --self-test
 ```
 
+To render offscreen previews of both perspective styles on a synthetic desktop, without screen-recording permission or a moving lid:
+
+```sh
+swift run -c debug MacBookDuoGlass --render-preview /tmp/duo-fold --style fold
+swift run -c debug MacBookDuoGlass --render-preview /tmp/duo-classic --style classic
+```
+
+Each run writes one PNG per angle and a contact sheet. Only the generated fixture is drawn; no screen content is read.
+
 ## Permission troubleshooting
 
 If capture is not ready, quit every running copy, open the copy in **Applications**, check **System Settings → Privacy & Security → Screen Recording**, and reopen the app. If needed, use the permission-recheck control in the Duo menu and review the diagnostics view. macOS can show duplicate entries when copies from different folders have been launched.
+
+## Acknowledgements
+
+The fold-plane style follows the fold-transition study in [DuoLauncher](https://github.com/jakesgoodapps/DuoLauncher) (MIT License, Copyright (c) 2026 Duo Launcher contributors): a picture plane anchored at the hinge whose far edge recedes into a trapezoid, a short smear confined to a band beside the hinge, and a late fade of the plane. That study is a timed Android snapshot animation; this app derives the same silhouette in closed form from a rigid plane tilted about the hinge and drives it from the lid angle. No DuoLauncher source code is included. Its proportions (a 7.5% hinge band, five smear copies weighted (6−k)/18, a fade starting at 78% of the motion) were reused as tuning constants.
 
 ## Uninstall
 

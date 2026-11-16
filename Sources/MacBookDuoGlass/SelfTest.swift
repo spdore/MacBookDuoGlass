@@ -111,6 +111,44 @@ enum SelfTest {
             return 1
         }
         print(String(format: "Perspective cap: %.0f° and independent of curve (ok)", EffectModel.clearThreshold))
+        // Fold-plane style: tilt and fade are pure functions of the linear lid
+        // progress, so they must not depend on the strength curve either.
+        var previousTilt = -1.0
+        var previousFade = -1.0
+        for step in 0...100 {
+            let progress = Double(step) / 100
+            let tilt = EffectModel.foldTiltDegrees(forProgress: progress)
+            let fade = EffectModel.foldFade(forProgress: progress)
+            guard tilt >= previousTilt, fade >= previousFade,
+                  tilt <= EffectModel.maximumFoldTiltDegrees else {
+                print("Fold tilt/fade monotonic: failed")
+                return 1
+            }
+            previousTilt = tilt
+            previousFade = fade
+        }
+        guard EffectModel.foldTiltDegrees(forProgress: 0) == 0,
+              abs(EffectModel.foldTiltDegrees(forProgress: 1) - EffectModel.maximumFoldTiltDegrees) < 1e-9,
+              EffectModel.foldFade(forProgress: EffectModel.foldFadeStart) == 0,
+              EffectModel.foldFade(forProgress: 1) == 1,
+              EffectModel.state(angle: 100).foldProgress == 0,
+              abs(EffectModel.state(angle: 0).foldProgress - 1) < 1e-6,
+              abs(EffectModel.state(angle: 50).foldProgress - 0.5) < 1e-6 else {
+            print("Fold tilt/fade endpoints: failed")
+            return 1
+        }
+        let progressAtMidpoint = EffectModel.state(angle: 50).foldProgress
+        EffectModel.intensityCurve = EffectModel.minimumIntensityCurve
+        let linearCurveProgress = EffectModel.state(angle: 50).foldProgress
+        EffectModel.intensityCurve = EffectModel.maximumIntensityCurve
+        let steepCurveProgress = EffectModel.state(angle: 50).foldProgress
+        EffectModel.intensityCurve = EffectModel.defaultIntensityCurve
+        guard progressAtMidpoint == linearCurveProgress, progressAtMidpoint == steepCurveProgress else {
+            print("Fold progress curve independence: failed")
+            return 1
+        }
+        print(String(format: "Fold plane: tilt 0°–%.0f° eased, fade from %.0f%% of the fold, independent of curve (ok)",
+                     EffectModel.maximumFoldTiltDegrees, EffectModel.foldFadeStart * 100))
         guard EffectModel.state(angle: 100).isClear,
               EffectModel.state(angle: 100.01).isClear,
               !EffectModel.state(angle: .nan).isValid else { return 1 }
@@ -156,8 +194,17 @@ enum SelfTest {
             return 1
         }
         print("Metal pipeline: ok")
+        // The overlay view builds both the classic and the fold-plane pipelines;
+        // if either failed, the overlay would silently never appear.
+        guard DuoMetalView(duoFrame: CGRect(x: 0, y: 0, width: 64, height: 64)) != nil else {
+            print("Overlay renderer init (both perspective pipelines): failed")
+            return 1
+        }
+        print("Overlay renderer init: classic and fold-plane pipelines (ok)")
         guard testRendering(device: device, library: library) else { return 1 }
-        benchmarkRendering(device: device, library: library)
+        guard testFoldRendering(device: device, library: library) else { return 1 }
+        benchmarkRendering(device: device, library: library, fragment: "duo_fragment", label: "classic glass")
+        benchmarkRendering(device: device, library: library, fragment: "duo_fragment_fold", label: "fold plane")
         let permissionText = CGPreflightScreenCaptureAccess() ? "granted" : "denied"
         print("Screen capture permission: \(permissionText)")
 
@@ -317,7 +364,127 @@ enum SelfTest {
         return true
     }
 
-    private static func benchmarkRendering(device: MTLDevice, library: MTLLibrary) {
+    // Geometry of the fold-plane pipeline on a smooth gradient, in projection-only
+    // mode so that only the projection (no blur or material) is measured.
+    private static func testFoldRendering(device: MTLDevice, library: MTLLibrary) -> Bool {
+        let width = 640, height = 400
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.storageMode = .shared
+        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        guard let source = device.makeTexture(descriptor: descriptor),
+              let output = device.makeTexture(descriptor: descriptor),
+              let queue = device.makeCommandQueue() else { return false }
+        var gradient = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                gradient[i] = 90
+                gradient[i + 1] = UInt8(40 + y * 170 / (height - 1))
+                gradient[i + 2] = UInt8(40 + x * 170 / (width - 1))
+            }
+        }
+        gradient.withUnsafeBytes {
+            source.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                           withBytes: $0.baseAddress!, bytesPerRow: width * 4)
+        }
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.vertexFunction = library.makeFunction(name: "duo_vertex")
+        pipelineDescriptor.fragmentFunction = library.makeFunction(name: "duo_fragment_fold")
+        pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        guard let pipeline = try? device.makeRenderPipelineState(descriptor: pipelineDescriptor) else {
+            print("Fold plane geometry: pipeline failed")
+            return false
+        }
+        func render(_ angle: Double) -> [UInt8]? {
+            let state = EffectModel.state(angle: angle, projectionOnly: true)
+            guard let command = queue.makeCommandBuffer() else { return nil }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = output
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setFragmentTexture(source, index: 0)
+            encoder.setFragmentTexture(source, index: 1)
+            var uniforms = DuoUniforms(state: state, aspect: Float(width) / Float(height),
+                                       time: 0, motionSpeed: 0)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DuoUniforms>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            encoder.endEncoding()
+            command.commit()
+            command.waitUntilCompleted()
+            guard command.status == .completed else { return nil }
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            bytes.withUnsafeMutableBytes {
+                output.getBytes($0.baseAddress!, bytesPerRow: width * 4,
+                                from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+            }
+            return bytes
+        }
+        func isLit(_ bytes: [UInt8], x: Int, row: Int) -> Bool {
+            let i = (row * width + x) * 4
+            return max(bytes[i], bytes[i + 1], bytes[i + 2]) > 20
+        }
+        // Left-most lit pixel in a row, i.e. how far the plane's side edge has moved in.
+        func leftInset(_ bytes: [UInt8], row: Int) -> Int {
+            (0..<width).first { isLit(bytes, x: $0, row: row) } ?? width
+        }
+
+        // 1) At the activation angle the picture is the source, untouched.
+        guard let clear = render(EffectModel.clearThreshold),
+              zip(clear, gradient).allSatisfy({ abs(Int($0) - Int($1)) <= 1 }) else {
+            print("Fold plane identity at the activation angle: failed")
+            return false
+        }
+        // 2) The hinge (bottom) edge stays put as the lid closes.
+        let bottomRow = height - 1
+        for angle in [75.0, 45.0, 30.0] {
+            guard let frame = render(angle) else { return false }
+            for x in stride(from: width / 4, to: width * 3 / 4, by: 17) {
+                let i = (bottomRow * width + x) * 4
+                guard abs(Int(frame[i + 2]) - Int(gradient[i + 2])) <= 3,
+                      abs(Int(frame[i + 1]) - Int(gradient[i + 1])) <= 3 else {
+                    print("Fold plane hinge anchoring at \(Int(angle))°: failed")
+                    return false
+                }
+            }
+        }
+        // 3) Nothing is cropped or stretched: the whole picture stays visible, and
+        //    the side edges converge more as the lid closes (a trapezoid, not a skew).
+        let probeRow = height * 65 / 100
+        var previousInset = -1
+        for angle in [90.0, 75.0, 60.0, 45.0, 30.0] {
+            guard let frame = render(angle) else { return false }
+            let inset = leftInset(frame, row: probeRow)
+            let rightInset = (0..<width).first { isLit(frame, x: width - 1 - $0, row: probeRow) } ?? width
+            guard inset >= previousInset, abs(inset - rightInset) <= 2 else {
+                print("Fold plane trapezoid at \(Int(angle))°: failed (inset \(inset)/\(rightInset))")
+                return false
+            }
+            previousInset = inset
+        }
+        guard previousInset > width / 30 else {
+            print("Fold plane trapezoid reaches too little: failed")
+            return false
+        }
+        // 4) Beyond the receding far edge, with the material off, the surround is exactly black.
+        guard let folded = render(45) else { return false }
+        guard (0..<width).allSatisfy({ !isLit(folded, x: $0, row: 0) }) else {
+            print("Fold plane surround: failed")
+            return false
+        }
+        // 5) The lid fully closed fades the plane to black.
+        guard let closed = render(0), closed.enumerated().allSatisfy({ $0.offset % 4 == 3 || $0.element <= 2 }) else {
+            print("Fold plane closed fade: failed")
+            return false
+        }
+        print("Fold plane geometry: identity at activation, hinge anchored, converging trapezoid, black surround, closed fade (ok)")
+        return true
+    }
+
+    private static func benchmarkRendering(device: MTLDevice, library: MTLLibrary,
+                                           fragment: String, label: String) {
         let displayID = CGMainDisplayID()
         guard let mode = CGDisplayCopyDisplayMode(displayID) else { return }
         let width = max(mode.pixelWidth, 128)
@@ -334,10 +501,10 @@ enum SelfTest {
         }
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.vertexFunction = library.makeFunction(name: "duo_vertex")
-        pipelineDescriptor.fragmentFunction = library.makeFunction(name: "duo_fragment")
+        pipelineDescriptor.fragmentFunction = library.makeFunction(name: fragment)
         pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: pipelineDescriptor) else {
-            print("GPU 60 Hz benchmark: pipeline unavailable")
+            print("GPU 60 Hz benchmark (\(label)): pipeline unavailable")
             return
         }
 
@@ -369,9 +536,8 @@ enum SelfTest {
             encoder.setRenderPipelineState(pipeline)
             encoder.setFragmentTexture(images[0], index: 0)
             encoder.setFragmentTexture(images[1], index: 1)
-            var uniforms = DuoUniforms(intensity: state.intensity, perspectiveDegrees: state.perspectiveDegrees,
-                blurPixels: state.blurPixels, darken: state.darken, milk: state.milk,
-                grain: state.grain, aspect: Float(width) / Float(height), time: 0, motionSpeed: 0)
+            var uniforms = DuoUniforms(state: state, aspect: Float(width) / Float(height),
+                                       time: 0, motionSpeed: 0)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DuoUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
@@ -381,6 +547,6 @@ enum SelfTest {
         lastCommand?.waitUntilCompleted()
         let elapsed = max(CACurrentMediaTime() - start, 0.0001)
         let fps = Double(frameCount) / elapsed
-        print(String(format: "Offscreen Gaussian + perspective: %.1f fps @ %dx%d (%@; excludes capture/presentation)", fps, width, height, fps >= 60 ? "ok" : "below target"))
+        print(String(format: "Offscreen Gaussian + perspective (%@): %.1f fps @ %dx%d (%@; excludes capture/presentation)", label, fps, width, height, fps >= 60 ? "ok" : "below target"))
     }
 }
