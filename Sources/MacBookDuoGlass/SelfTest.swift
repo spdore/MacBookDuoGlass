@@ -75,6 +75,7 @@ enum SelfTest {
             return 1
         }
         print("Haha mirror mode: projection only, no material effect (ok)")
+        guard testPerspectiveStylePersistence() else { return 1 }
         var previous: Float = 1
         for angle in stride(from: 0.0, through: 100.0, by: 0.5) {
             let state = EffectModel.state(angle: angle)
@@ -364,6 +365,42 @@ enum SelfTest {
         return true
     }
 
+    // The perspective style defaults to the fold plane when nothing (or nothing
+    // valid) is stored, and a chosen style is read back and persisted. It works on
+    // the real defaults and restores them exactly, including an absent key.
+    private static func testPerspectiveStylePersistence() -> Bool {
+        let defaults = UserDefaults.standard
+        let key = EffectModel.perspectiveStyleKey
+        let savedValue = defaults.object(forKey: key)
+        let savedStyle = EffectModel.perspectiveStyle
+        defer {
+            EffectModel.perspectiveStyle = savedStyle
+            if let savedValue { defaults.set(savedValue, forKey: key) } else { defaults.removeObject(forKey: key) }
+        }
+
+        defaults.removeObject(forKey: key)
+        guard EffectModel.storedPerspectiveStyle() == .foldPlane else {
+            print("Perspective style default after clearing the key: failed")
+            return false
+        }
+        defaults.set("not-a-style", forKey: key)
+        guard EffectModel.storedPerspectiveStyle() == .foldPlane else {
+            print("Perspective style default for an unknown value: failed")
+            return false
+        }
+        for style in [PerspectiveStyle.classicGlass, .foldPlane] {
+            EffectModel.perspectiveStyle = style
+            guard EffectModel.perspectiveStyle == style,
+                  defaults.string(forKey: key) == style.rawValue,
+                  EffectModel.storedPerspectiveStyle() == style else {
+                print("Perspective style read-back of \(style.rawValue): failed")
+                return false
+            }
+        }
+        print("Perspective style: defaults to fold plane, set and read back (ok)")
+        return true
+    }
+
     // Geometry of the fold-plane pipeline on a smooth gradient, in projection-only
     // mode so that only the projection (no blur or material) is measured.
     private static func testFoldRendering(device: MTLDevice, library: MTLLibrary) -> Bool {
@@ -396,7 +433,8 @@ enum SelfTest {
             print("Fold plane geometry: pipeline failed")
             return false
         }
-        func render(_ angle: Double) -> [UInt8]? {
+        func render(_ angle: Double, motionSpeed: Float = 0, texture: MTLTexture? = nil,
+                    foldAmount: Float? = nil) -> [UInt8]? {
             let state = EffectModel.state(angle: angle, projectionOnly: true)
             guard let command = queue.makeCommandBuffer() else { return nil }
             let pass = MTLRenderPassDescriptor()
@@ -405,10 +443,11 @@ enum SelfTest {
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return nil }
             encoder.setRenderPipelineState(pipeline)
-            encoder.setFragmentTexture(source, index: 0)
-            encoder.setFragmentTexture(source, index: 1)
+            encoder.setFragmentTexture(texture ?? source, index: 0)
+            encoder.setFragmentTexture(texture ?? source, index: 1)
             var uniforms = DuoUniforms(state: state, aspect: Float(width) / Float(height),
-                                       time: 0, motionSpeed: 0)
+                                       time: 0, motionSpeed: motionSpeed)
+            if let foldAmount { uniforms.foldAmount = foldAmount }
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<DuoUniforms>.stride, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
@@ -479,7 +518,41 @@ enum SelfTest {
             print("Fold plane closed fade: failed")
             return false
         }
-        print("Fold plane geometry: identity at activation, hinge anchored, converging trapezoid, black surround, closed fade (ok)")
+        // 6) Mirror mode has no hinge smear. In projection-only mode every material
+        //    term is multiplied by zero, so the only thing left that reads the fold
+        //    amount is the smear. The frame must therefore be identical with the
+        //    fold amount zeroed, both at rest and at full lid speed, on a source
+        //    with fine detail (a 2 px checkerboard) where any smear would show.
+        let checkerDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        checkerDescriptor.storageMode = .shared
+        checkerDescriptor.usage = [.shaderRead]
+        guard let checker = device.makeTexture(descriptor: checkerDescriptor) else { return false }
+        var checkerBytes = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let value: UInt8 = ((x / 2) + (y / 2)) % 2 == 0 ? 30 : 230
+                let i = (y * width + x) * 4
+                checkerBytes[i] = value
+                checkerBytes[i + 1] = value
+                checkerBytes[i + 2] = value
+            }
+        }
+        checkerBytes.withUnsafeBytes {
+            checker.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                            withBytes: $0.baseAddress!, bytesPerRow: width * 4)
+        }
+        for angle in [60.0, 30.0] {
+            for speed: Float in [0, 420] {
+                guard let withFold = render(angle, motionSpeed: speed, texture: checker),
+                      let withoutFold = render(angle, motionSpeed: speed, texture: checker, foldAmount: 0),
+                      withFold == withoutFold else {
+                    print("Mirror mode hinge smear at \(Int(angle))° (lid speed \(Int(speed))°/s): failed")
+                    return false
+                }
+            }
+        }
+        print("Fold plane geometry: identity at activation, hinge anchored, converging trapezoid, black surround, closed fade, no hinge smear in mirror mode (ok)")
         return true
     }
 

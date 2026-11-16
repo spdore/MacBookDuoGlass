@@ -564,11 +564,13 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         // composited one over another. The offset grows with the fold, so the
         // band is exactly sharp at a = 0. In the study the smear belongs to the
         // moving transition; here it is mostly driven by lid speed and leaves
-        // only a faint soft foot when the lid rests.
+        // only a faint soft foot when the lid rests. It is a material effect:
+        // Mirror Mode (projection only, intensity 0) is a pure trapezoid and
+        // skips it, so the hinge band stays as sharp as the source.
         float creaseBand = 1.0 - smoothstep(0.0, 0.075, depth);
         float creaseMotion = smoothstep(15.0, 240.0, abs(u.motionSpeed));
         float creaseReach = u.foldAmount * (0.25 + 0.75 * creaseMotion);
-        if (creaseBand > 0.001 && creaseReach > 0.0) {
+        if (u.intensity > 0.0 && creaseBand > 0.001 && creaseReach > 0.0) {
             for (int k = 1; k <= 5; ++k) {
                 float2 shifted = sourceUV + float2(0.0, 0.0028 * float(k) * creaseReach);
                 color = mix(color, glassSample(source, strongBlur, shifted, depth),

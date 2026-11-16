@@ -35,7 +35,7 @@ The app's menu controls are currently displayed in Chinese. They provide these f
 - The activation-angle slider chooses a threshold from 75° to 120°.
 - The effect-curve slider adjusts how quickly the frosted effect grows as the lid closes. It does not change the perspective.
 - The fold-plane toggle chooses the perspective style (on: fold plane, off: classic glass). Both styles use the same frosted material.
-- Mirror Mode shows the perspective without blur or frosted-material effects.
+- Mirror Mode shows the perspective without blur or frosted-material effects. With the fold-plane style that means a plain trapezoid on a black background: no hinge smear, edge light or surround glow.
 - Adaptive Angle learns a stationary angle after 3 seconds and sets the threshold to that angle minus 3° (minimum 75°). Turning it off restores the previous manual threshold.
 - A permission-recheck control is available if screen-recording access was granted while the app was running.
 

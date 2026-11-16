@@ -20,6 +20,9 @@ struct EffectState: Sendable {
     let grain: Float
     /// Linear lid progress, 0 at the activation angle and 1 fully closed.
     /// Independent of the strength curve, like `perspectiveDegrees`.
+    /// The fold-plane style is driven by this alone (see `foldTiltDegrees`);
+    /// `perspectiveDegrees` only feeds the classic glass style and has no effect
+    /// on the fold plane.
     var foldProgress: Float = 0
 }
 
@@ -55,11 +58,12 @@ struct EffectModel {
         return clampIntensityCurve(stored?.doubleValue ?? defaultIntensityCurve)
     }()
 
-    private static let perspectiveStyleKey = "effectPerspectiveStyle"
-    private static var cachedPerspectiveStyle: PerspectiveStyle = {
-        let stored = UserDefaults.standard.string(forKey: perspectiveStyleKey)
-        return stored.flatMap(PerspectiveStyle.init(rawValue:)) ?? .foldPlane
-    }()
+    static let perspectiveStyleKey = "effectPerspectiveStyle"
+    /// The persisted style; a missing or unknown value means the fold plane.
+    static func storedPerspectiveStyle(in defaults: UserDefaults = .standard) -> PerspectiveStyle {
+        defaults.string(forKey: perspectiveStyleKey).flatMap(PerspectiveStyle.init(rawValue:)) ?? .foldPlane
+    }
+    private static var cachedPerspectiveStyle: PerspectiveStyle = storedPerspectiveStyle()
 
     static var perspectiveStyle: PerspectiveStyle {
         get { cachedPerspectiveStyle }
