@@ -17,11 +17,32 @@ struct DuoUniforms {
     // uses this only for a short motion-scattering contribution while the
     // lid is moving.
     var motionSpeed: Float
+    // Fold-plane style only (duo_fragment_fold). Defaults keep the classic
+    // pipeline's callers unchanged.
+    // Backward tilt of the picture plane about the hinge, in radians.
+    var foldTilt: Float = 0
+    // Eased lid progress 0...1, used to scale plane-local effects.
+    var foldAmount: Float = 0
+    // 0...1 dimming toward black as the lid nears fully closed.
+    var foldFade: Float = 0
+}
+
+extension DuoUniforms {
+    init(state: EffectState, aspect: Float, time: Float, motionSpeed: Float) {
+        let progress = Double(state.foldProgress)
+        self.init(intensity: state.intensity, perspectiveDegrees: state.perspectiveDegrees,
+                  blurPixels: state.blurPixels, darken: state.darken, milk: state.milk,
+                  grain: state.grain, aspect: aspect, time: time, motionSpeed: motionSpeed,
+                  foldTilt: Float(EffectModel.foldTiltDegrees(forProgress: progress) * .pi / 180),
+                  foldAmount: Float(EffectModel.foldAmount(forProgress: progress)),
+                  foldFade: Float(EffectModel.foldFade(forProgress: progress)))
+    }
 }
 
 final class DuoMetalView: MTKView, MTKViewDelegate {
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    private let foldPipeline: MTLRenderPipelineState
     private let textureCache: CVMetalTextureCache
     private var latestPixelBuffer: CVPixelBuffer?
     private var parameters = EffectState(angle: 90, isValid: true, isClear: true, projectionOnly: false, intensity: 0, perspectiveDegrees: 0, blurPixels: 0, darken: 0, milk: 0, grain: 0)
@@ -75,7 +96,8 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
               let commandQueue = device.makeCommandQueue(),
               let library = try? device.makeLibrary(source: Self.shaderSource, options: nil),
               let vertex = library.makeFunction(name: "duo_vertex"),
-              let fragment = library.makeFunction(name: "duo_fragment") else {
+              let fragment = library.makeFunction(name: "duo_fragment"),
+              let foldFragment = library.makeFunction(name: "duo_fragment_fold") else {
             return nil
         }
 
@@ -84,6 +106,10 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         descriptor.fragmentFunction = fragment
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else {
+            return nil
+        }
+        descriptor.fragmentFunction = foldFragment
+        guard let foldPipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else {
             return nil
         }
 
@@ -95,6 +121,7 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
 
         self.commandQueue = commandQueue
         self.pipeline = pipeline
+        self.foldPipeline = foldPipeline
         self.textureCache = cache
         super.init(frame: frame, device: device)
 
@@ -190,16 +217,11 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         encoder.setFragmentTexture(images[0], index: 0)
         encoder.setFragmentTexture(images[1], index: 1)
 
-        encoder.setRenderPipelineState(pipeline)
+        encoder.setRenderPipelineState(EffectModel.perspectiveStyle == .foldPlane ? foldPipeline : pipeline)
 
         do {
             var uniforms = DuoUniforms(
-                intensity: parameters.intensity,
-                perspectiveDegrees: parameters.perspectiveDegrees,
-                blurPixels: parameters.blurPixels,
-                darken: parameters.darken,
-                milk: parameters.milk,
-                grain: parameters.grain,
+                state: parameters,
                 aspect: Float(drawableSize.width / max(drawableSize.height, 1)),
                 time: Float(now - startTime),
                 motionSpeed: smoothedMotionSpeed
@@ -294,6 +316,9 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         float aspect;
         float time;
         float motionSpeed;
+        float foldTilt;
+        float foldAmount;
+        float foldFade;
     };
 
     struct VertexOut {
@@ -481,6 +506,153 @@ final class DuoMetalView: MTKView, MTKViewDelegate {
         color.rgb += noise * edgeCoverage;
         color.a = 1.0;
         return color;
+    }
+    // Sharp image near the hinge, strong Gaussian image far from it. Both are
+    // read at the SAME coordinate, so the mix is a material response and never
+    // a displaced second copy.
+    float4 glassSample(texture2d<float, access::sample> sharp,
+                       texture2d<float, access::sample> soft,
+                       float2 uv, float depth) {
+        constexpr sampler s(address::clamp_to_edge, filter::linear);
+        float2 c = clamp(uv, float2(0.0), float2(1.0));
+        return mix(sharp.sample(s, c), soft.sample(s, c), depth);
+    }
+
+    // Fold-plane style. The picture is a rigid plane tilted back by u.foldTilt
+    // about the hinge (the bottom edge) and seen from a fixed eye. For a screen
+    // point (xo, yo) the eye ray is intersected with the tilted plane in closed
+    // form, which gives the source coordinate directly:
+    //   denom  = d*cos(a) + (eyeHeight - yo)*sin(a)
+    //   planeY = d*yo / denom                  (0 at the hinge, 1 at the far edge)
+    //   scale  = 1 + yo*sin(a) / denom         (horizontal perspective factor)
+    // a = 0 is the identity. Nothing is cropped: the whole screen stays on the
+    // plane, the hinge edge stays put and the far edge recedes into a trapezoid.
+    fragment float4 duo_fragment_fold(
+        VertexOut in [[stage_in]],
+        texture2d<float, access::sample> source [[texture(0)]],
+        texture2d<float, access::sample> strongBlur [[texture(1)]],
+        constant DuoUniforms &u [[buffer(0)]]) {
+        constexpr sampler linearSampler(address::clamp_to_edge, filter::linear);
+
+        float2 outputUV = in.uv;
+        float xo = (outputUV.x - 0.5) * u.aspect;
+        float yo = clamp(1.0 - outputUV.y, 0.0, 1.0);
+
+        const float eyeDistance = 2.5;
+        const float eyeHeight = 0.30;
+        float sinA = sin(u.foldTilt);
+        float cosA = cos(u.foldTilt);
+        float denom = max(eyeDistance * cosA + (eyeHeight - yo) * sinA, 0.001);
+        float planeY = eyeDistance * yo / denom;
+        float scale = 1.0 + yo * sinA / denom;
+        float2 projectedUV = float2(xo * scale / max(u.aspect, 0.001) + 0.5, 1.0 - planeY);
+        float2 sourceUV = clamp(projectedUV, float2(0.0), float2(1.0));
+        float depth = clamp(planeY, 0.0, 1.0);
+
+        // One-pixel anti-aliased silhouette on the sides and the far edge. The
+        // hinge edge never moves, so it is not part of the test; at a = 0 the
+        // silhouette coincides with the screen border and coverage is exactly 1.
+        float2 pixel = max(fwidth(projectedUV), float2(1e-6));
+        float edgePx = min(min(projectedUV.x, 1.0 - projectedUV.x) / pixel.x,
+                           projectedUV.y / pixel.y);
+        float coverage = clamp(edgePx + 0.5, 0.0, 1.0);
+
+        float4 color = glassSample(source, strongBlur, sourceUV, depth);
+
+        // Hinge smear: a few translucent copies shifted toward the hinge,
+        // clipped to a narrow band (7.5% of the depth) and weighted (6-k)/18,
+        // composited one over another. The offset grows with the fold, so the
+        // band is exactly sharp at a = 0. In the study the smear belongs to the
+        // moving transition; here it is mostly driven by lid speed and leaves
+        // only a faint soft foot when the lid rests.
+        float creaseBand = 1.0 - smoothstep(0.0, 0.075, depth);
+        float creaseMotion = smoothstep(15.0, 240.0, abs(u.motionSpeed));
+        float creaseReach = u.foldAmount * (0.25 + 0.75 * creaseMotion);
+        if (creaseBand > 0.001 && creaseReach > 0.0) {
+            for (int k = 1; k <= 5; ++k) {
+                float2 shifted = sourceUV + float2(0.0, 0.0028 * float(k) * creaseReach);
+                color = mix(color, glassSample(source, strongBlur, shifted, depth),
+                            (6.0 - float(k)) / 18.0 * creaseBand);
+            }
+        }
+
+        // Light is transmitted best near the hinge and attenuates with distance.
+        float opticalDistance = depth * (0.35 + 0.65 * u.foldAmount);
+        float distanceTransmission = exp(-0.65 * opticalDistance);
+        float transmissionAmount = u.foldAmount * u.intensity * (0.18 + 0.38 * u.intensity);
+        float transmission = mix(1.0, distanceTransmission, clamp(transmissionAmount, 0.0, 0.62));
+        color.rgb *= transmission;
+
+        // Motion scattering along the depth axis while the lid is moving.
+        float motionFactor = smoothstep(60.0, 520.0, abs(u.motionSpeed));
+        float motionRadius = (0.0015 + 0.0055 * depth) * motionFactor * u.intensity;
+        if (motionRadius > 0.00001) {
+            float4 motionA = glassSample(source, strongBlur, sourceUV - float2(0.0, motionRadius), depth);
+            float4 motionB = glassSample(source, strongBlur, sourceUV + float2(0.0, motionRadius), depth);
+            color.rgb = mix(color.rgb, 0.5 * (motionA.rgb + motionB.rgb), 0.10 * motionFactor * u.intensity);
+        }
+
+        // Small red/blue offsets: chromatic dispersion without moving green.
+        float2 dispersionDirection = normalize(float2((outputUV.x - 0.5) * 0.75, -max(depth, 0.08)));
+        float dispersion = 0.0009 * u.intensity * u.foldAmount * pow(depth, 1.25);
+        if (dispersion > 0.00002) {
+            float4 redSample = glassSample(source, strongBlur, sourceUV + dispersionDirection * dispersion, depth);
+            float4 blueSample = glassSample(source, strongBlur, sourceUV - dispersionDirection * dispersion, depth);
+            float3 dispersed = color.rgb;
+            dispersed.r = redSample.r * transmission;
+            dispersed.b = blueSample.b * transmission;
+            color.rgb = mix(color.rgb, dispersed, 0.82);
+        }
+
+        float verticalGradient = 0.35 + 0.65 * depth;
+        color.rgb *= 1.0 - u.darken * verticalGradient;
+        color.rgb = mix(color.rgb, float3(0.96, 0.97, 1.0), u.milk * verticalGradient);
+
+        // Glass reflection on the tilted plane (normal tilts toward the eye).
+        float3 normal = normalize(float3(0.0, sinA, cosA));
+        float3 planePoint = float3(xo, planeY * cosA, -planeY * sinA);
+        float3 eye = float3(0.0, eyeHeight, eyeDistance);
+        float3 viewDirection = normalize(eye - planePoint);
+        float3 lightDirection = normalize(float3(-0.35, 0.65, 1.0));
+        float3 halfDirection = normalize(lightDirection + viewDirection);
+        float specular = pow(max(dot(normal, halfDirection), 0.0), 28.0);
+        float fresnel = pow(1.0 - max(dot(normal, viewDirection), 0.0), 3.0);
+        float sheenCenter = 0.25 + 0.18 * sin(u.foldAmount * 1.6);
+        float sheen = exp(-pow((outputUV.x - sheenCenter) / 0.28, 2.0));
+        float reflectionMask = smoothstep(0.06, 0.92, depth) * (0.35 + 0.65 * u.foldAmount);
+        float reflection = u.intensity * reflectionMask *
+                           (0.026 * specular + 0.012 * fresnel + 0.022 * sheen);
+        color.rgb += float3(0.82, 0.92, 1.0) * reflection;
+
+        // Narrow contact highlight where the plane meets the hinge.
+        float contactBand = 1.0 - smoothstep(0.0, 0.085, depth);
+        float contactSpecular = pow(max(dot(normal, viewDirection), 0.0), 6.0);
+        float contact = u.intensity * u.foldAmount * contactBand *
+                        (0.018 + 0.035 * contactSpecular);
+        color.rgb += float3(0.86, 0.94, 1.0) * contact;
+
+        // Thin lit rim along the receding edges.
+        float rim = exp(-max(edgePx, 0.0) / 2.5) * 0.10 * u.intensity * u.foldAmount;
+        color.rgb += float3(0.85, 0.92, 1.0) * rim;
+
+        float distanceFade = smoothstep(0.18, 1.0, depth);
+        float blackFade = clamp(0.32 * u.intensity * u.foldAmount * distanceFade, 0.0, 0.72);
+        color.rgb *= 1.0 - blackFade;
+
+        // Outside the plane: a faint spill of the heavily blurred picture that
+        // dies away with distance, so the surround is not a dead black.
+        float2 outside = max(max(-projectedUV, projectedUV - 1.0), float2(0.0));
+        float outsideDistance = max(outside.x, outside.y);
+        float3 ambient = strongBlur.sample(linearSampler, sourceUV).rgb *
+                         (0.34 * u.intensity * u.foldAmount) *
+                         pow(1.0 - smoothstep(0.0, 0.22, outsideDistance), 2.0);
+
+        float3 rgb = color.rgb * coverage + ambient * (1.0 - coverage);
+        rgb *= 1.0 - u.foldFade;
+
+        float noise = (hash21(outputUV * 1024.0 + float2(u.time)) - 0.5) * u.grain;
+        rgb += noise * coverage;
+        return float4(rgb, 1.0);
     }
     """
 }

@@ -18,6 +18,20 @@ struct EffectState: Sendable {
     let darken: Float
     let milk: Float
     let grain: Float
+    /// Linear lid progress, 0 at the activation angle and 1 fully closed.
+    /// Independent of the strength curve, like `perspectiveDegrees`.
+    var foldProgress: Float = 0
+}
+
+/// How the lid angle is turned into a projected picture.
+enum PerspectiveStyle: String, Sendable {
+    /// A rigid picture plane that tilts back about the hinge (bottom edge) and is
+    /// seen in perspective: the whole screen stays visible, the hinge edge stays
+    /// put and the far edge recedes into a trapezoid.
+    case foldPlane
+    /// The original model: a glass pane swings in front of fixed content and the
+    /// picture is resampled through it.
+    case classicGlass
 }
 
 struct EffectModel {
@@ -40,6 +54,47 @@ struct EffectModel {
         let stored = UserDefaults.standard.object(forKey: intensityCurveKey) as? NSNumber
         return clampIntensityCurve(stored?.doubleValue ?? defaultIntensityCurve)
     }()
+
+    private static let perspectiveStyleKey = "effectPerspectiveStyle"
+    private static var cachedPerspectiveStyle: PerspectiveStyle = {
+        let stored = UserDefaults.standard.string(forKey: perspectiveStyleKey)
+        return stored.flatMap(PerspectiveStyle.init(rawValue:)) ?? .foldPlane
+    }()
+
+    static var perspectiveStyle: PerspectiveStyle {
+        get { cachedPerspectiveStyle }
+        set {
+            cachedPerspectiveStyle = newValue
+            UserDefaults.standard.set(newValue.rawValue, forKey: perspectiveStyleKey)
+        }
+    }
+
+    // Fold-plane geometry. The plane tilts at most `maximumFoldTilt` back about
+    // the hinge. About 14° of tilt at the eye distance used by the shader gives
+    // the silhouette of the DuoLauncher fold study (far edge ~9% narrower, ~12%
+    // shallower); the lid keeps closing well past that, so the maximum is larger.
+    static let maximumFoldTiltDegrees: Double = 42
+    // The plane dims to black over the last part of the fold, like the study's
+    // late fade, so a nearly closed lid does not show a bright sliver.
+    static let foldFadeStart: Double = 0.78
+
+    /// Ease-in/ease-out of the linear lid progress (the study's
+    /// accelerate-decelerate timing, applied to the lid instead of a clock).
+    /// A pure function of the angle: the same angle always gives the same picture.
+    static func foldAmount(forProgress progress: Double) -> Double {
+        let p = min(max(progress, 0), 1)
+        return p * p * (3 - 2 * p)
+    }
+
+    static func foldTiltDegrees(forProgress progress: Double) -> Double {
+        maximumFoldTiltDegrees * foldAmount(forProgress: progress)
+    }
+
+    static func foldFade(forProgress progress: Double) -> Double {
+        let p = min(max(progress, 0), 1)
+        let t = min(max((p - foldFadeStart) / (1 - foldFadeStart), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
 
     static var clearThreshold: Double {
         get { cachedThreshold }
@@ -132,7 +187,8 @@ struct EffectModel {
             blurPixels: projectionOnly ? 0 : 48,
             darken: 0.14 * curvedIntensity,
             milk: 0.045 * curvedIntensity,
-            grain: 0.004 * curvedIntensity
+            grain: 0.004 * curvedIntensity,
+            foldProgress: Float(progress)
         )
     }
 
